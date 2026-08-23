@@ -27,6 +27,20 @@ services:
       - AUTH_TOKEN=${AUTH_TOKEN}
       - NGINX_PORT=${NGINX_PORT:-443}
       - DATA_DIR=/app/data
+      # WEB proxy support. All optional — an empty value behaves exactly as if unset,
+      # so existing installations need no .env changes.
+      # Second public IP for WEB when 443 on the main one is taken by another service.
+      - WEB_BIND_IP=${WEB_BIND_IP:-}
+      # Public IP of this node, used to verify the WEB domain's A record. Only needed
+      # when the panel is too old to send nodeIp.
+      - PUBLIC_IP=${PUBLIC_IP:-}
+      # Cloudflare token (Zone:DNS:Edit) for ACME DNS-01.
+      - CF_API_TOKEN=${CF_API_TOKEN:-}
+      # Pin telemt to a specific release; empty uses the version built into the image.
+      - TELEMT_VERSION=${TELEMT_VERSION:-}
+      # Set to 1 to use the Let's Encrypt staging directory while testing.
+      - ACME_STAGING=${ACME_STAGING:-}
+      - CERT_RENEW_DAYS=${CERT_RENEW_DAYS:-}
     networks:
       - mtproto-net
 
