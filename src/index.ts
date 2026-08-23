@@ -11,6 +11,7 @@ import { getAllProxies, getCustomDomains, setCustomDomains, getBlacklistedIps, s
 import { collectAllProxyStats, exportProxies, importProxies, ExportBundle } from './services/proxy';
 import { ensureXrayContainersRunning } from './services/xray';
 import { getCapabilities } from './services/capabilities';
+import { renewDueCertificates } from './services/acme';
 import { execFile } from 'child_process';
 
 const app = express();
@@ -152,6 +153,20 @@ async function bootstrap(): Promise<void> {
 
         // Run first collection after 30 seconds so containers are ready
         setTimeout(() => collectAllProxyStats().catch(() => {}), 30000);
+
+        // Certificate renewal — checked every 12 hours. Issuance is a no-op until a
+        // certificate is inside its renewal window, so this is cheap to run often.
+        const renewCertificates = async () => {
+          try {
+            if (await renewDueCertificates()) {
+              await updateNginxConfig(getAllProxies());
+            }
+          } catch (err) {
+            console.error('Certificate renewal error:', err);
+          }
+        };
+        setInterval(renewCertificates, 12 * 60 * 60 * 1000);
+        setTimeout(renewCertificates, 60000);
 
         // Real-time IP recording from nginx log stream
         startNginxLogWatcher();

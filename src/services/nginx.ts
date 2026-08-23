@@ -2,6 +2,8 @@ import Docker from 'dockerode';
 import { config } from '../config';
 import { ProxyConfig, ConnectedIpInfo } from '../types';
 import { pullImage } from './docker';
+import { createTar } from '../utils/tar';
+import * as acme from './acme';
 import * as store from '../store';
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -227,6 +229,46 @@ export async function ensureNginxContainer(): Promise<void> {
   }
 }
 
+const CERTS_PATH = '/etc/nginx/certs';
+
+/**
+ * Copy stored certificates into the nginx container.
+ *
+ * Certificates live in DATA_DIR (already a mounted volume) and are pushed with
+ * putArchive, the same way nginx.conf is. That deliberately avoids adding a bind mount,
+ * which would require recreating the production nginx container.
+ *
+ * Must run before every reload that references a certificate, and after the container
+ * is recreated, since the container filesystem is not persistent.
+ */
+export async function pushCertificates(domains: string[]): Promise<void> {
+  if (domains.length === 0) return;
+
+  const container = docker.getContainer(config.nginxContainerName);
+
+  for (const domain of domains) {
+    const stored = acme.readCertificate(domain);
+    if (!stored) {
+      console.warn(`Нет сертификата для ${domain}, пропускаю`);
+      continue;
+    }
+
+    // putArchive extracts into an existing directory, so create it first.
+    const mkdir = await container.exec({
+      Cmd: ['mkdir', '-p', `${CERTS_PATH}/${domain}`],
+      AttachStdout: true,
+      AttachStderr: true,
+    });
+    await mkdir.start({});
+
+    const tar = createTar([
+      { name: 'fullchain.pem', content: stored.cert },
+      { name: 'privkey.pem', content: stored.key, mode: 0o600 },
+    ]);
+    await container.putArchive(tar, { path: `${CERTS_PATH}/${domain}` });
+  }
+}
+
 export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   // Filter out proxies whose containers don't exist (stale data)
   const aliveProxies: ProxyConfig[] = [];
@@ -254,6 +296,12 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   }
   // Only include proxies whose IP we could resolve
   const reachableProxies = aliveProxies.filter((p) => ipMap.has(p.containerName));
+
+  // Certificates must be in place before a config that references them is loaded.
+  // ensureNginxContainer above may have just recreated the container, whose filesystem
+  // starts empty, so this re-pushes unconditionally rather than only on change.
+  const webDomains = reachableProxies.filter((p) => p.type === 'web').map((p) => p.domain);
+  await pushCertificates(webDomains);
 
   const nginxConf = generateNginxConfig(reachableProxies, ipMap);
   const container = docker.getContainer(config.nginxContainerName);

@@ -19,6 +19,10 @@ export const config = {
   webBindIp: process.env.WEB_BIND_IP || '',
   // Cloudflare API token (Zone:DNS:Edit) for ACME DNS-01. Can be overridden per proxy.
   cfApiToken: process.env.CF_API_TOKEN || '',
+  // Let's Encrypt staging directory — no rate limits, untrusted certs. For testing only.
+  acmeStaging: process.env.ACME_STAGING === '1',
+  // Renew once fewer than this many days remain on the certificate.
+  certRenewDays: parseInt(process.env.CERT_RENEW_DAYS || '30', 10),
   authToken: process.env.AUTH_TOKEN || '',
   dataDir: process.env.DATA_DIR || path.join(__dirname, '..', 'data'),
   dockerNetwork: 'mtproto-net',
