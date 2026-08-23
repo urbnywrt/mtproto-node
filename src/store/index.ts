@@ -250,3 +250,35 @@ export function removeIpHistory(proxyId: string): void {
   ipHistoryDirty = true;
   scheduleIpHistoryFlush();
 }
+
+/**
+ * One-time backfill of containerPort for proxies created before the field existed.
+ *
+ * nginx targets the port telemt was configured with at creation time. Without this,
+ * an operator who later changes NGINX_PORT — which adopting the second-IP scheme
+ * requires — would silently break every existing fake TLS proxy on the node: the
+ * upstream would point at a port nothing listens on, and the TLS handshake would
+ * just hang with nothing in the logs.
+ *
+ * The value is read from each container's own config.toml where possible, so the
+ * result does not depend on NGINX_PORT still holding its original value.
+ */
+export async function backfillContainerPorts(
+  readPort: (containerName: string) => Promise<number | null>
+): Promise<void> {
+  const data = readStore();
+  const pending = data.proxies.filter((p) => p.type !== 'web' && p.containerPort === undefined);
+  if (pending.length === 0) return;
+
+  for (const proxy of pending) {
+    const actual = await readPort(proxy.containerName);
+    proxy.containerPort = actual ?? proxy.listenPort ?? config.nginxPort;
+    console.log(
+      `Миграция: ${proxy.domain} слушает порт ${proxy.containerPort}` +
+        (actual === null ? ' (из настроек, контейнер недоступен)' : ' (из конфига контейнера)')
+    );
+  }
+
+  writeStore(data);
+  console.log(`Миграция: containerPort проставлен для ${pending.length} прокси`);
+}

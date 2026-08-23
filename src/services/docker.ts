@@ -368,6 +368,35 @@ export async function getNetworkGateway(): Promise<string> {
   );
 }
 
+/**
+ * Port telemt is configured to listen on inside an existing container, read from its
+ * own config.toml. Ground truth for backfilling containerPort on upgrade, and immune
+ * to NGINX_PORT having been changed in the meantime. Null when it cannot be read —
+ * a stopped container, or one predating this layout.
+ */
+export async function readContainerListenPort(containerName: string): Promise<number | null> {
+  try {
+    const container = docker.getContainer(containerName);
+    const exec = await container.exec({
+      Cmd: ['grep', '-m1', '-E', '^port = [0-9]+', '/etc/telemt/config.toml'],
+      AttachStdout: true,
+      AttachStderr: true,
+    });
+    const stream = (await exec.start({})) as unknown as NodeJS.ReadableStream;
+    const output = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (c: Buffer) => chunks.push(c));
+      stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      stream.on('error', reject);
+    });
+
+    const match = /port\s*=\s*(\d+)/.exec(output);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface WebProxyConfigOptions {
   secret: string;
   domain: string;
