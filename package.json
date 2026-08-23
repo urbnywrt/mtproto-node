@@ -9,7 +9,8 @@
     "dev": "ts-node src/index.ts",
     "check:site": "node tools/site-check.js",
     "check:nginx": "node tools/nginx-check.js",
-    "check": "npm run check:site && npm run check:nginx"
+    "check": "npm run check:site && npm run check:nginx && npm run check:proxy",
+    "check:proxy": "node tools/proxy-check.js"
   },
   "dependencies": {
     "acme-client": "^5.4.0",

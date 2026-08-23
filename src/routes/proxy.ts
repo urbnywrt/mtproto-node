@@ -137,6 +137,20 @@ router.get('/:id/link', async (req: Request, res: Response) => {
   res.json({ link });
 });
 
+// Re-issue the certificate for a WEB proxy (after the operator fixes DNS or the token)
+router.post('/:id/renew-cert', async (req: Request, res: Response) => {
+  try {
+    const proxy = await proxyService.renewProxyCertificate(req.params.id);
+    if (!proxy) {
+      res.status(404).json({ error: 'Proxy not found' });
+      return;
+    }
+    res.json(proxy);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 // Get proxy stats history
 router.get('/:id/stats-history', async (req: Request, res: Response) => {
   try {

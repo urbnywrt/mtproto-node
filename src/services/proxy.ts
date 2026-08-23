@@ -3,11 +3,123 @@ import { config, FAKE_TLS_DOMAINS } from '../config';
 import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyType, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry } from '../types';
 import { generateSecret, getRandomElement, getRandomPort, buildFullSecret } from '../utils/crypto';
 import * as store from '../store';
+import * as acmeService from './acme';
 import * as dockerService from './docker';
 import * as nginxService from './nginx';
+import * as preflightService from './preflight';
 import * as xrayService from './xray';
 
+/**
+ * WEB proxies take a separate path: the domain is the operator's own rather than one
+ * drawn from the fake TLS pool, creation is gated on preflight, and a certificate has
+ * to exist before nginx will publish the vhost.
+ */
+async function createWebProxy(req: ProxyCreateRequest): Promise<ProxyConfig> {
+  if (!req.domain) {
+    throw new Error('Для WEB-прокси нужен собственный домен: из пула fake TLS он не берётся.');
+  }
+  if (!req.acmeEmail) {
+    throw new Error('Для WEB-прокси нужен email для ACME.');
+  }
+
+  // Runs before any container, certificate or DNS record exists, so a failure here
+  // leaves nothing behind to clean up.
+  const { targetIp } = await preflightService.preflightWebProxy({
+    domain: req.domain,
+    nodeIp: req.nodeIp,
+    acmeDnsToken: req.acmeDnsToken,
+  });
+
+  const id = uuidv4().split('-')[0];
+  const secret = req.secret || generateSecret();
+  const containerName = `${config.proxyContainerPrefix}${id}`;
+
+  let port = req.port || 0;
+  if (!port) {
+    do {
+      port = getRandomPort(config.portRangeStart, config.portRangeEnd);
+    } while (store.isPortUsed(port));
+  } else if (store.isPortUsed(port)) {
+    throw new Error(`Port ${port} is already in use`);
+  }
+
+  let vpnContainerName: string | undefined;
+  let socks5Host: string | undefined;
+  if (req.vpnSubscription) {
+    vpnContainerName = `${config.xrayContainerPrefix}${id}`;
+    const vlessConfig = await xrayService.fetchAndParseSubscription(req.vpnSubscription);
+    await xrayService.createXrayContainer(vpnContainerName, vlessConfig);
+    socks5Host = vpnContainerName;
+  }
+
+  const { nodeIp: _nodeIp, ...persistable } = req;
+  const natIp = req.natIp || config.natIp || undefined;
+
+  const proxy: ProxyConfig = {
+    // Spread first: a null or undefined `port`/`secret` in the request must not clobber
+    // the values generated above.
+    ...persistable,
+    id,
+    name: req.name || `Proxy ${id}`,
+    note: req.note || '',
+    port,
+    secret,
+    domain: req.domain,
+    containerName,
+    status: 'running',
+    createdAt: new Date().toISOString(),
+    trafficUp: 0,
+    trafficDown: 0,
+    connectedIps: [],
+    vpnContainerName,
+    type: 'web',
+    webCarrier: req.webCarrier || 'https-lanes',
+    webSecretMode: req.webSecretMode || 'plain',
+    certStatus: 'pending',
+    natIp,
+    tunnelInterface: req.tunnelInterface || config.tunnelInterface || undefined,
+  };
+
+  let stored = false;
+  try {
+    await dockerService.createWebProxyContainer({
+      containerName,
+      siteSeed: id,
+      secret,
+      domain: req.domain,
+      publicIp: targetIp,
+      carrier: proxy.webCarrier!,
+      secretMode: proxy.webSecretMode!,
+      // Mode 1 shares nginx's stream listener, so telemt cannot see real client IPs.
+      neutralizePerIpLimits: !config.webBindIp,
+      socks5Host,
+      natIp,
+      options: req,
+    });
+    store.addProxy(proxy);
+    stored = true;
+
+    // Best effort: ACME failures are commonly transient (propagation, rate limits), and
+    // discarding a fully created proxy over one would be worse than reporting it. The
+    // vhost stays unpublished until a certificate exists, and the renewal timer retries.
+    await acmeService.ensureCertificate(proxy);
+
+    await nginxService.updateNginxConfig(store.getAllProxies());
+    return store.getProxyById(id) || proxy;
+  } catch (error) {
+    if (stored) store.removeProxy(id);
+    await dockerService.removeProxyContainer(containerName);
+    if (vpnContainerName) await xrayService.removeXrayContainer(vpnContainerName);
+    acmeService.removeCertificate(req.domain);
+    // Put nginx back in step with the store after the rollback.
+    await nginxService.updateNginxConfig(store.getAllProxies()).catch(() => {});
+    throw error;
+  }
+}
+
 export async function createProxy(req: ProxyCreateRequest): Promise<ProxyConfig> {
+  if (req.type === 'web') return createWebProxy(req);
+
   const id = uuidv4().split('-')[0];
   const secret = req.secret || generateSecret();
 
@@ -274,6 +386,11 @@ export async function deleteProxy(id: string): Promise<boolean> {
   if (proxy.vpnContainerName) {
     await xrayService.removeXrayContainer(proxy.vpnContainerName);
   }
+  if (proxy.type === 'web') {
+    // Otherwise a later proxy on the same domain would inherit this certificate and
+    // listCertifiedDomains would keep reporting a domain nothing serves.
+    acmeService.removeCertificate(proxy.domain);
+  }
   store.removeProxy(id);
   store.removeStatsHistory(id);
   store.removeIpHistory(id);
@@ -384,9 +501,29 @@ export function getProxyLink(id: string, serverIp: string): string | null {
   const proxy = store.getProxyById(id);
   if (!proxy) return null;
 
+  if (proxy.type === 'web') {
+    // Telegram Desktop ignores any port in a WEB link and always connects on 443, so
+    // the host is the proxy's own domain rather than the node address passed in.
+    // The secret is the plain 16-byte value, or dd-prefixed; ee (fake TLS) is not
+    // supported by WEB mode.
+    const secret = proxy.webSecretMode === 'dd' ? `dd${proxy.secret}` : proxy.secret;
+    return `https://t.me/webproxy?server=${encodeURIComponent(proxy.domain)}&secret=${secret}`;
+  }
+
   const fullSecret = buildFullSecret(proxy.secret, proxy.domain);
   const port = proxy.listenPort || config.nginxPort;
   return `tg://proxy?server=${encodeURIComponent(serverIp)}&port=${port}&secret=${fullSecret}`;
+}
+
+/** Re-attempt certificate issuance for a WEB proxy after the operator fixes DNS. */
+export async function renewProxyCertificate(id: string): Promise<ProxyConfig | undefined> {
+  const proxy = store.getProxyById(id);
+  if (!proxy) return undefined;
+  if (proxy.type !== 'web') throw new Error('Сертификат нужен только WEB-прокси');
+
+  await acmeService.ensureCertificate(proxy);
+  await nginxService.updateNginxConfig(store.getAllProxies());
+  return store.getProxyById(id);
 }
 
 export function getProxyStatsHistory(id: string): StatsSnapshot[] {

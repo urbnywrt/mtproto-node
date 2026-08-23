@@ -55,6 +55,9 @@ export const config = {
   // by another service (typically a remnawave/Xray node). Empty = WEB shares the main
   // nginx listener. See PLAN.md §3.
   webBindIp: process.env.WEB_BIND_IP || '',
+  // Public IP clients reach this node on. Only needed in mode 1, where the node cannot
+  // infer it; the panel also supplies it per request as nodeIp.
+  publicIp: process.env.PUBLIC_IP || '',
   // Cloudflare API token (Zone:DNS:Edit) for ACME DNS-01. Can be overridden per proxy.
   cfApiToken: process.env.CF_API_TOKEN || '',
   // Let's Encrypt staging directory — no rate limits, untrusted certs. For testing only.
