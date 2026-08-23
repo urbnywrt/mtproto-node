@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { config, FAKE_TLS_DOMAINS } from './config';
+import { config, FAKE_TLS_DOMAINS, TELEMT_VERSION } from './config';
 import { authMiddleware } from './middleware/auth';
 import proxyRoutes from './routes/proxy';
 import healthRoutes from './routes/health';
@@ -118,7 +118,7 @@ async function bootstrap(): Promise<void> {
         console.log('Reconnecting containers to network...');
         await reconnectContainersToNetwork();
 
-        console.log('Building telemt proxy image...');
+        console.log(`Building telemt proxy image (telemt ${TELEMT_VERSION})...`);
         await ensureProxyImage();
 
         // Ensure xray (VPN) containers are running BEFORE telemt containers.

@@ -1,4 +1,4 @@
-import { config } from '../config';
+import { config, TELEMT_VERSION } from '../config';
 
 /**
  * Whether this node can host WEB proxies, and under which of the two 443 schemes.
@@ -21,11 +21,17 @@ export interface NodeCapabilities {
   bindIp: string | null;
   /** Whether CF_API_TOKEN is set, so the panel knows if a per-proxy token is required. */
   acmeTokenConfigured: boolean;
+  /**
+   * telemt version this node builds its proxy image from. Reported because under the
+   * previous "latest" scheme the running version was unknowable without shelling into
+   * a container, and differed between nodes.
+   */
+  telemtVersion: string;
   reason: string;
 }
 
 export function getCapabilities(): NodeCapabilities {
-  const base = { acmeTokenConfigured: !!config.cfApiToken };
+  const base = { acmeTokenConfigured: !!config.cfApiToken, telemtVersion: TELEMT_VERSION };
 
   if (config.webBindIp && config.nginxPort === 443) {
     // stream would bind 0.0.0.0:443 while the WEB vhost binds <webBindIp>:443.

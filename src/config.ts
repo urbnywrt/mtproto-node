@@ -1,9 +1,37 @@
 import path from 'path';
 
-// Pinned explicitly instead of "latest": the WEB carrier protocol is days old and
-// breaking changes are likely. Bumping this string changes the Dockerfile hash and
-// triggers an image rebuild (see ensureProxyImage).
-export const TELEMT_VERSION = '3.5.2';
+const DEFAULT_TELEMT_VERSION = '3.5.2';
+
+/**
+ * Pinned explicitly instead of "latest".
+ *
+ * "latest" never actually updated anything here: ensureProxyImage rebuilds only when
+ * the Dockerfile text hash changes, and a Dockerfile containing the literal string
+ * "releases/latest/download" is constant — so the version was resolved once, on the
+ * node's very first image build, and frozen forever. Different nodes silently ran
+ * different unknown versions, and a node built before 3.5.0 could never pick up WEB
+ * support at all.
+ *
+ * With an explicit version the opposite is true: changing it changes the hash, which
+ * is what makes an upgrade actually propagate.
+ *
+ * TELEMT_VERSION overrides it per node, so a new release can be rolled out to one node
+ * and verified before the default is bumped for everyone.
+ */
+export const TELEMT_VERSION = resolveTelemtVersion();
+
+function resolveTelemtVersion(): string {
+  const override = (process.env.TELEMT_VERSION || '').trim();
+  if (!override) return DEFAULT_TELEMT_VERSION;
+  // The value is interpolated into a Dockerfile RUN line, so keep it to a bare version.
+  if (!/^\d+\.\d+\.\d+$/.test(override)) {
+    console.warn(
+      `TELEMT_VERSION="${override}" не похоже на версию вида X.Y.Z, использую ${DEFAULT_TELEMT_VERSION}`
+    );
+    return DEFAULT_TELEMT_VERSION;
+  }
+  return override;
+}
 
 // Fixed port of the private WEB listener inside each telemt container. Every proxy
 // container has its own network namespace, so a single constant cannot collide.

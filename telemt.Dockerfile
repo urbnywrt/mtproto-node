@@ -4,7 +4,9 @@ RUN apt-get update && \
     apt-get install -y curl wget ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Keep this version in sync with TELEMT_VERSION in src/config.ts.
+# Standalone build path. The service node does not use this file — it builds from the
+# inline template in src/services/docker.ts. Keep the default in sync with
+# DEFAULT_TELEMT_VERSION in src/config.ts; override with --build-arg TELEMT_VERSION=X.Y.Z.
 ARG TELEMT_VERSION=3.5.2
 
 RUN wget -qO- "https://github.com/telemt/telemt/releases/download/${TELEMT_VERSION}/telemt-x86_64-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \
