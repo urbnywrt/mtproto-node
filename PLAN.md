@@ -1,0 +1,280 @@
+# WEB proxy support — план реализации (mtproto-node)
+
+Ветка: `feature/web-proxy`. Парная ветка в `mtproto-panel` — см. `mtproto-panel/PLAN.md`.
+
+Цель: добавить второй тип прокси `web` (Telegram WEB proxy, telemt ≥ 3.5.2) рядом
+с существующим `faketls`, не меняя поведение существующих прокси и **не трогая
+remnawave/Xray на тех же машинах**.
+
+---
+
+## 1. Источники истины
+
+| Вопрос | Источник |
+|---|---|
+| Протокол, формат ссылки, требования к сайту | `telegramdesktop/tproxy-server`, ветка **`master`** (не `main`) |
+| Ключи и значения конфига | `telemt/telemt@main`, `docs/WEB/WEB_PROXY.en.md`, `docs/Config_params/CONFIG_PARAMS.en.md#web` |
+
+Зафиксированные факты:
+
+- telemt **не терминирует TLS**. Схема: клиент → :443 TLS → nginx → plain HTTP/1.1 → WEB-слушатель telemt.
+- Carrier-режимы в telemt: **только `https` и `https-lanes`**. `websocket`/`websocket-lanes` описаны
+  в `PROTOCOL.md`, но telemt их не реализует (PR #898 → 3.5.1).
+- Секрет: `plain` (32 hex) или `dd` (34 hex). `ee` (FakeTLS) в WEB **не поддержан**.
+- Ссылка: `https://t.me/webproxy?server=<host>&secret=<hex>`. Порта нет.
+- **Весь vhost целиком** обязан идти на telemt. Разделять `/api/v1/*` и сайт на терминаторе
+  запрещено — это само по себе детектируемо.
+- Зарезервированные пути: `GET /?bridge=<cap>`, `/api/v1/{session,up,down,ws}`.
+- `https-lanes` требует HTTP/2 на публичной стороне.
+- **443 обязателен и необсуждаем**: клиент игнорирует порт в ссылке, telemt валидирует
+  `public_addr` строго как `IP:443`.
+
+---
+
+## 2. Принятые допущения
+
+1. **`[general.modes]` не гейтит WEB.** Минимальный пример в `WEB_PROXY.en.md` использует
+   `secret_mode = "dd"` и при этом не задаёт `[general.modes]` вовсе. Внутренний хендшейк
+   определяет `secret_mode` профиля. → Оставляем `[general.modes]` как есть.
+2. **`[server] port` из конфига web-прокси убираем**, слушатель только через `[[server.listeners]]`.
+3. **`secret_mode` по умолчанию `plain`** (ровно 32 hex). `dd` — опция в форме.
+4. **`public_addr` = публичный IP, на который смотрит A-запись домена** (в режиме 2 — `WEB_BIND_IP`,
+   в режиме 1 — основной IP ноды). `natIp` на него не влияет: за ME/KDF-сторону отвечает
+   отдельный `middle_proxy_nat_ip`.
+5. **Генератор сайта — по строгому правилу `PUBLIC_SITE.md`**: внешний `/styles.css`,
+   никакого inline `<style>`/`<script>`, никаких сторонних ресурсов.
+6. **`webCarrier` по умолчанию `https-lanes`** (дефолт telemt — `https`, но HTTP/2 мы
+   включаем всё равно, а lanes снимают head-of-line blocking между стримами).
+
+---
+
+## 3. Схема на 443: два режима, выбор автоматический
+
+Нода определяет режим на старте и при preflight. remnawave/Xray **не трогается ни в одном**.
+
+### Режим 1 — «443 свободен» (нода без remnawave)
+
+Как сегодня, плюс L7-ветка:
+
+```
+:443  stream, ssl_preread, общий server (НЕ трогаем)
+        map $ssl_preread_server_name $backend
+          ├── faketls-домен → <container-ip>:443    ← как сейчас, байт-в-байт
+          ├── web-домен     → 127.0.0.1:8443        ← новое
+          └── default       → 127.0.0.1:8088        ← как сейчас
+:8443 http{}, по server-блоку на web-домен, ssl + http2 → http://<container-ip>:18080
+```
+
+### Режим 2 — «443 занят» (нода с remnawave), включается заданием `WEB_BIND_IP`
+
+Xray остаётся единственным владельцем 443 на своём IP. WEB живёт на втором публичном IP
+и **минует stream целиком**:
+
+```
+IP₁:443            Xray Reality — не наше, не трогаем
+IP₁:NGINX_PORT     stream, ssl_preread → faketls-прокси (как сейчас)
+IP₂:443            http{} listen <WEB_BIND_IP>:443 ssl; http2 on;  → http://<container-ip>:18080
+```
+
+A-запись web-домена указывает на IP₂.
+
+### Почему это лучше цепочки за Reality
+
+Рассматривался вариант «`realitySettings.target` → наш nginx stream». Отклонён: он требует
+правки боевого инбаунда remnawave и заворачивает весь MTProxy-трафик через fallback-форвардер
+Xray. Второй IP не трогает соседнюю систему вообще.
+
+### Реальный IP клиента
+
+- **Режим 2 — проблемы нет.** nginx принимает TLS напрямую на `IP₂:443`, `$remote_addr`
+  настоящий, `X-Forwarded-For` в telemt корректный, per-IP лимиты `[web.limits]` работают штатно.
+- **Режим 1 — IP до telemt не доходит.** `proxy_protocol on` в nginx `stream` — директива
+  уровня `server` и переменных не принимает, а server на :443 общий для faketls и web.
+  Включить выборочно нельзя, включить для всех — сломает faketls-бэкенды.
+  Компенсация: в `[web.limits]` ставим `max_sessions_per_ip = max_sessions_global` и
+  `max_bootstraps_per_ip = max_bootstraps_global`, а настоящее пер-IP ограничение вешаем
+  на nginx `stream` через существующий `limit_conn_zone` (там `$remote_addr` реальный).
+  Учёт IP для панели не затрагивается — он и сейчас построен на stream-логе.
+
+### Конфликт биндов
+
+Если `WEB_BIND_IP` задан **и** `NGINX_PORT == 443`, stream на `0.0.0.0:443` столкнётся
+с http на `IP₂:443`. Preflight обязан ловить эту комбинацию и отказывать с внятным текстом.
+
+### Внутри контейнера telemt (оба режима одинаково)
+
+```toml
+[[server.listeners]]
+ip = "0.0.0.0"
+port = 18080
+transport = "web"
+proxy_protocol = false
+reuse_allow = false
+web_client_ip_source = "x_forwarded_for"
+web_trusted_proxy_cidrs = ["<gateway>/32"]   # шлюз mtproto-net, резолвится в рантайме
+```
+
+Порт 18080 фиксированный: у каждого контейнера свой сетевой namespace.
+Диапазон 10001–19999 (`proxy.port`, `limitPortMap`) не задействуем.
+
+### Обязательные детали nginx
+
+- `access_log off` на L7-vhost. В query лежит bridge-capability, в `Authorization` —
+  bootstrap/session-бирер. Логировать их запрещено инвариантами telemt.
+- `client_max_body_size 2m` ≥ `web.limits.max_body_bytes`.
+- `proxy_read_timeout`/`proxy_send_timeout` = 35s > `long_poll_secs` = 25s.
+- `proxy_request_buffering off`, `proxy_buffering off`, `proxy_next_upstream off`.
+- `http2 on` (nginx:latest ≥ 1.25.1).
+
+---
+
+## 4. Сертификаты: ACME DNS-01 через Cloudflare
+
+HTTP-01 не используем: `:80` может быть занят, а DNS-01 работает одинаково в обоих режимах
+и вообще не зависит от портов. Как следствие — **из ТЗ выпадает проверка «80 доступен снаружи»**:
+она стала бессмысленной, порт больше не участвует.
+
+- Провайдер: **Cloudflare**, токен со scope `Zone:DNS:Edit`.
+- Токен берётся из env ноды `CF_API_TOKEN`; опциональный per-proxy override из панели —
+  для случая доменов на разных аккаунтах. Env — основной путь, чтобы секрет не ходил через панель.
+- Хранение сертификатов и ACME-аккаунта: `DATA_DIR` (уже смонтирован томом).
+- Доставка в nginx: `putArchive` в `/etc/nginx/certs/<domain>/` + `reload`. Томов не добавляем,
+  прод-контейнер nginx не пересоздаём. `ensureNginxContainer` при пересоздании обязан
+  заново залить все сертификаты до `reload`.
+- Автопродление при остатке < 30 дней.
+
+**Критично:** A-запись web-домена обязана быть **DNS-only (серое облако)**. Оранжевое облако
+терминирует TLS у Cloudflare, и WEB-каррier ломается полностью. Preflight это проверяет
+(см. этап 5) — резолв в диапазоны Cloudflare трактуем как проксированную запись и отказываем.
+
+---
+
+## 5. Модель данных
+
+`domain` **переиспользуем**, отдельного `webDomain` не заводим: это и сейчас «SNI, на который
+отвечает прокси». Благодаря этому SNI-map, `isDomainUsed` и трекинг IP работают для web-прокси
+без правок.
+
+Новые поля `ProxyConfig` (все опциональные, отсутствие = `faketls`):
+
+| Поле | Тип | Смысл |
+|---|---|---|
+| `type` | `'faketls' \| 'web'` | дефолт `faketls` |
+| `acmeEmail` | `string` | контакт для ACME |
+| `acmeDnsToken` | `string?` | per-proxy override для `CF_API_TOKEN` |
+| `webCarrier` | `'https' \| 'https-lanes'` | дефолт `https-lanes` |
+| `webSecretMode` | `'plain' \| 'dd'` | дефолт `plain` |
+| `certStatus` | `'pending' \| 'active' \| 'error'` | статус сертификата |
+| `certExpiresAt` | `string` | ISO-дата |
+| `certLastError` | `string` | текст последней ошибки выпуска |
+
+Новое в `config.ts`: `webBindIp` (`WEB_BIND_IP`), `cfApiToken` (`CF_API_TOKEN`).
+
+Существующий `secret` (16 байт hex) годится для WEB как есть.
+
+---
+
+## 6. Этапы
+
+Каждый этап — отдельный мелкий коммит, собирается (`tsc`) и стартует.
+
+### Этап 1 — пин версии, модель данных, capabilities
+- `TELEMT_DOCKERFILE` в `src/services/docker.ts` и `telemt.Dockerfile`:
+  `releases/latest/download/` → `releases/download/3.5.2/`, версия в одну константу.
+- Новые поля в `types.ts` и `config.ts`.
+- Стор: записи без `type` читаются как `faketls`.
+- **`GET /api/capabilities`** — новый эндпоинт: может ли нода держать WEB
+  (`{ web: boolean, mode: 1|2|null, bindIp, reason }`). Нужен панели, чтобы гейтить форму.
+- **Готово когда:** сборка проходит, сервис стартует, выдача `GET /api/proxies` не изменилась
+  кроме `type: 'faketls'`.
+- **Риск:** смена хеша Dockerfile пересоберёт образ `telemt-proxy-v4`. Работающие контейнеры
+  останутся на старом image ID, на 3.5.2 переедут только при пересоздании. Проверить, что
+  faketls-прокси после пересоздания на 3.5.2 живой.
+
+### Этап 2 — ACME DNS-01
+- `src/services/acme.ts`: `acme-client` + Cloudflare DNS API (`_acme-challenge` TXT,
+  ожидание распространения, уборка записи после валидации).
+- Хранение в `DATA_DIR`, доставка в nginx через `putArchive`, автопродление по таймеру.
+- **Готово когда:** на стенде выпускается и подхватывается сертификат для тестового домена;
+  прод-контейнер nginx при этом не пересоздавался; повторный вызов не выпускает лишний серт.
+
+### Этап 3 — генератор публичного сайта
+- `src/services/site-generator.ts`: детерминированный от seed (id прокси).
+- Вариативность не косметическая: разные структуры разметки, разные наборы страниц (3–5),
+  разные тематики/тексты/навигация/имена классов/имена файлов ассетов, разный `styles.css`,
+  свой SVG-favicon, свой 404.
+- Ограничения: внешний CSS, никакого inline `<style>`/`<script>`, никаких сторонних ресурсов,
+  никаких форм. Бюджет: ≤ 4096 файлов, ≤ 8 MiB на файл, ≤ 64 MiB суммарно.
+- **Готово когда:** юнит-тест подтверждает, что два разных seed дают несовпадающие структуру
+  DOM, набор страниц и CSS; дерево проходит проверку ограничений.
+
+### Этап 4 — WEB-конфиг telemt и L7-vhost nginx
+- `docker.ts`: `generateWebConfigToml()` — `[[server.listeners]] transport="web"`, `[web]`,
+  `[[web.vhosts]]`, `[web.vhosts.decoy] mode="static_directory"`, `[[web.vhosts.profiles]]`,
+  `[web.limits]` (в режиме 1 — с нейтрализованными per-IP потолками).
+  `[[upstreams]]` (VLESS/socks5) переиспользуем без изменений — секция глобальная,
+  от transport слушателя не зависит.
+- Dockerfile: `/var/lib/telemt/public` с `chown telemt:telemt`. Сайт заливается `putArchive`
+  перед стартом контейнера, как `config.toml`.
+- `nginx.ts`: `generateNginxConfig` учитывает `type` и режим; шлюз mtproto-net резолвится
+  через `network.inspect()` для `web_trusted_proxy_cidrs`.
+- **Готово когда:** web-прокси поднимается в обоих режимах; `curl https://<домен>/` отдаёт
+  сгенерированный сайт, неизвестный путь — 404 сайта, `GET /?bridge=мусор` — обычный index.
+
+### Этап 5 — preflight, CRUD, ссылка
+- `src/services/preflight.ts`:
+  - домен резолвится и совпадает с целевым IP (режим 1 — IP ноды, режим 2 — `WEB_BIND_IP`);
+  - **запись не проксирована Cloudflare** (резолв в CF-диапазоны → отказ с явным текстом
+    про серое облако);
+  - домен не занят другим прокси;
+  - 443 биндится на целевом IP; конфликт `WEB_BIND_IP` + `NGINX_PORT==443` → отказ;
+  - `CF_API_TOKEN` или `acmeDnsToken` присутствует и валиден (пробный вызов CF API).
+
+  Выполняется **до** создания контейнера; при провале прокси не создаётся.
+- `createProxy`/`updateProxy`/`deleteProxy`: ветвление по `type`; для `web` домен обязателен
+  и из пула `FAKE_TLS_DOMAINS` **не берётся**; при удалении — снос сертификата и vhost'а.
+- `getProxyLink`: `web` → `https://t.me/webproxy?server=<domain>&secret=<plain|dd>`,
+  `faketls` → текущий `tg://proxy?...` без изменений. Для `web` параметр `server_ip`
+  игнорируется, хост берётся из `domain`.
+- **Готово когда:** создание web-прокси с непровалидированным доменом возвращает 400
+  и не оставляет мусора (контейнер, запись в сторе, vhost, TXT-запись в CF).
+
+### Этапы 6–7 — панель
+См. `mtproto-panel/PLAN.md`.
+
+### Этап 8 — сквозная проверка на стенде
+По чеклисту `WEB_PROXY.en.md` → «Initial verification», плюс:
+1. Существующий faketls-прокси на той же ноде работает (регрессия — главное).
+2. Нода с remnawave: Xray и VLESS-клиенты не задеты, режим 2 поднялся на IP₂.
+3. `GET /`, неизвестный путь и невалидный `bridge` отдают сайт-приманку.
+4. Клиент подключается по `https://t.me/webproxy?...`.
+5. HTTP/2 на публичном соединении; два одновременных стрима для `https-lanes`.
+6. Long poll > 25 с не рвётся.
+7. Автопродление сертификата (staging-ACME).
+8. web-прокси с VLESS-подпиской ходит через туннель.
+9. Проверка допущений §2.1 и §2.2 на реальном бинарнике.
+
+---
+
+## 7. Обратимость
+
+- Схему БД панели не трогаем (таблицы прокси там нет) — откатывать нечего.
+- Все новые поля `ProxyConfig` опциональны; запись без `type` читается как `faketls`.
+- Генерация nginx-конфига при `type='faketls'` даёт **побайтово тот же результат**, что и сейчас,
+  пока в сторе нет ни одного web-прокси. Закрепить снапшот-тестом на этапе 4 — основная
+  страховка от регрессии в проде.
+- remnawave не затрагивается ни в одном режиме, откатывать там нечего.
+- Откат = `git revert` ветки + пересоздание образа telemt. Работающие контейнеры переживают
+  откат без пересоздания.
+
+---
+
+## 8. Что осознанно НЕ делаем
+
+- WebSocket-карриеры — telemt их не реализует.
+- Пул доменов для WEB — домен здесь свой и один.
+- `decoy mode="http_upstream"` — только `static_directory`.
+- Цепочку за Reality `target` — отклонена в пользу второго IP.
+- HTTP-01 и проверку «:80 доступен снаружи» — обессмыслены переходом на DNS-01.
+- Реальный XFF до telemt в режиме 1 — компенсируется на уровне nginx (§3).
+- Прод-конфиги, `.env` и конфиги remnawave не трогаем.
