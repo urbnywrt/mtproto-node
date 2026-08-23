@@ -14,6 +14,8 @@ export interface StoredCertificate {
   cert: string;
   key: string;
   expiresAt: string;
+  /** Whether this certificate came from the Let's Encrypt staging directory. */
+  staging: boolean;
 }
 
 interface CertMeta {
@@ -34,6 +36,7 @@ export function readCertificate(domain: string): StoredCertificate | null {
       cert: fs.readFileSync(path.join(dir, 'fullchain.pem'), 'utf-8'),
       key: fs.readFileSync(path.join(dir, 'privkey.pem'), 'utf-8'),
       expiresAt: meta.expiresAt,
+      staging: !!meta.staging,
     };
   } catch {
     return null;
@@ -57,8 +60,14 @@ export function listCertifiedDomains(): string[] {
   }
 }
 
-function needsRenewal(expiresAt: string): boolean {
-  const remainingMs = new Date(expiresAt).getTime() - Date.now();
+function needsRenewal(existing: StoredCertificate): boolean {
+  // A staging certificate is untrusted by clients, and a production one issued while
+  // testing wastes rate limit. Either way, flipping ACME_STAGING must take effect —
+  // waiting for the renewal window would silently leave the wrong certificate in place
+  // for months.
+  if (existing.staging !== config.acmeStaging) return true;
+
+  const remainingMs = new Date(existing.expiresAt).getTime() - Date.now();
   return remainingMs < config.certRenewDays * 24 * 60 * 60 * 1000;
 }
 
@@ -171,7 +180,7 @@ export async function issueCertificate(
     };
     fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
 
-    return { cert: cert.toString(), key: key.toString(), expiresAt };
+    return { cert: cert.toString(), key: key.toString(), expiresAt, staging: config.acmeStaging };
   } finally {
     for (const record of created) {
       await cloudflare.deleteRecord(token, zoneId, record.id).catch((err) => {
@@ -190,7 +199,7 @@ export async function ensureCertificate(proxy: ProxyConfig): Promise<boolean> {
   if (proxy.type !== 'web') return false;
 
   const existing = readCertificate(proxy.domain);
-  if (existing && !needsRenewal(existing.expiresAt)) {
+  if (existing && !needsRenewal(existing)) {
     store.updateProxy(proxy.id, {
       certStatus: 'active',
       certExpiresAt: existing.expiresAt,
@@ -208,6 +217,7 @@ export async function ensureCertificate(proxy: ProxyConfig): Promise<boolean> {
     const token = resolveToken(proxy);
     console.log(`ACME: выпуск сертификата для ${proxy.domain}...`);
     const issued = await issueCertificate(proxy.domain, proxy.acmeEmail, token);
+    if (issued.staging) console.warn(`ACME: ${proxy.domain} использует staging-сертификат, клиенты ему не доверяют`);
     store.updateProxy(proxy.id, {
       certStatus: 'active',
       certExpiresAt: issued.expiresAt,
