@@ -1,7 +1,7 @@
 import Docker from 'dockerode';
 import { Readable } from 'stream';
 import { createHash } from 'crypto';
-import { config } from '../config';
+import { config, TELEMT_VERSION } from '../config';
 import { StringDecoder } from 'string_decoder';
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -13,7 +13,7 @@ RUN apt-get update && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN ARCH=$(uname -m) && \\
-    wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-\${ARCH}-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \\
+    wget -qO- "https://github.com/telemt/telemt/releases/download/${TELEMT_VERSION}/telemt-\${ARCH}-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \\
     chmod +x /usr/local/bin/telemt
 
 RUN useradd -r -s /bin/false telemt && \\

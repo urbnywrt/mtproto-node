@@ -11,6 +11,19 @@ function ensureDataDir(): void {
   }
 }
 
+/**
+ * Records written before WEB support have no `type`. Treat them as fake TLS so every
+ * consumer can rely on the field being present. Purely additive — reverting the WEB
+ * feature leaves these records readable.
+ */
+function normalize(data: StoreData): StoreData {
+  if (!Array.isArray(data.proxies)) return data;
+  for (const proxy of data.proxies) {
+    if (!proxy.type) proxy.type = 'faketls';
+  }
+  return data;
+}
+
 function readStore(): StoreData {
   ensureDataDir();
   if (!fs.existsSync(STORE_FILE)) {
@@ -25,7 +38,7 @@ function readStore(): StoreData {
     return initial;
   }
   try {
-    return JSON.parse(raw);
+    return normalize(JSON.parse(raw));
   } catch {
     console.error('store.json is corrupted, resetting to empty state');
     const initial: StoreData = { proxies: [] };

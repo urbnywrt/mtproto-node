@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { config, FAKE_TLS_DOMAINS } from '../config';
-import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry } from '../types';
+import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyType, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry } from '../types';
 import { generateSecret, getRandomElement, getRandomPort, buildFullSecret } from '../utils/crypto';
 import * as store from '../store';
 import * as dockerService from './docker';
@@ -49,6 +49,9 @@ export async function createProxy(req: ProxyCreateRequest): Promise<ProxyConfig>
     socks5Host = vpnContainerName;
   }
 
+  // nodeIp is a request-only hint used for preflight checks; it must not be persisted.
+  const { nodeIp: _nodeIp, ...persistable } = req;
+
   const proxy: ProxyConfig = {
     id,
     name: req.name || `Proxy ${id}`,
@@ -63,7 +66,8 @@ export async function createProxy(req: ProxyCreateRequest): Promise<ProxyConfig>
     trafficDown: 0,
     connectedIps: [],
     vpnContainerName,
-    ...req,
+    ...persistable,
+    type: req.type || 'faketls',
     natIp: req.natIp || config.natIp || undefined,
     tunnelInterface: req.tunnelInterface || config.tunnelInterface || undefined,
   };
@@ -133,7 +137,9 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
     needsRestart = true;
   }
 
-  const advancedProxyKeys: Array<keyof ProxyUpdateRequest> = [
+  // Only keys that exist on both sides are copyable; this excludes request-only
+  // hints such as nodeIp, which are used for validation and never persisted.
+  const advancedProxyKeys: Array<keyof ProxyUpdateRequest & keyof ProxyConfig> = [
     'useMiddleProxy',
     'fastMode',
     'me2dcFallback',
@@ -405,6 +411,8 @@ export interface ExportedProxy {
   secret: string;
   domain: string;
   port: number;
+  /** Absent in bundles exported before WEB support — imported as 'faketls'. */
+  type?: ProxyType;
   listenPort?: number;
   tag?: string;
   maxConnections?: number;
@@ -465,6 +473,7 @@ export function exportProxies(): ExportBundle {
       secret: p.secret,
       domain: p.domain,
       port: p.port,
+      type: p.type,
       listenPort: p.listenPort,
       tag: p.tag,
       maxConnections: p.maxConnections,

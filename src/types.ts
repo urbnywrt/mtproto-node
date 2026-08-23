@@ -4,13 +4,45 @@ export interface ConnectedIpInfo {
   countryCode?: string;
 }
 
-export interface ProxyConfig {
+/**
+ * 'faketls' — MTProxy over fake TLS, routed by SNI through the nginx stream block.
+ * 'web'     — Telegram WEB proxy (telemt >= 3.5.1): HTTPS carrier terminated by nginx
+ *             and forwarded as plain HTTP/1.1 to a private telemt WEB listener.
+ * Absent in stored records predating WEB support — normalized to 'faketls' on read.
+ */
+export type ProxyType = 'faketls' | 'web';
+
+export type WebCarrier = 'https' | 'https-lanes';
+
+/** Telegram Desktop secret representation. 'ee' (fake TLS) is not supported by WEB mode. */
+export type WebSecretMode = 'plain' | 'dd';
+
+export type CertStatus = 'pending' | 'active' | 'error';
+
+/** Fields that only apply when type === 'web'. */
+export interface WebProxyFields {
+  acmeEmail?: string;
+  /** Per-proxy override for the node-wide CF_API_TOKEN. Never returned to clients. */
+  acmeDnsToken?: string;
+  webCarrier?: WebCarrier;
+  webSecretMode?: WebSecretMode;
+}
+
+export interface ProxyConfig extends WebProxyFields {
   id: string;
   name: string;
   note: string;
   port: number;
   secret: string;
+  /**
+   * SNI this proxy answers to. For 'faketls' — a domain from the fake TLS pool;
+   * for 'web' — the operator's own domain with a real certificate.
+   */
   domain: string;
+  type: ProxyType;
+  certStatus?: CertStatus;
+  certExpiresAt?: string;
+  certLastError?: string;
   containerName: string;
   status: 'running' | 'stopped' | 'paused' | 'error';
   createdAt: string;
@@ -62,7 +94,10 @@ export interface ProxyConfig {
   meInitRetryAttempts?: number;
 }
 
-export interface ProxyCreateRequest {
+export interface ProxyCreateRequest extends WebProxyFields {
+  type?: ProxyType;
+  /** Public IP the panel knows for this node; checked against the domain's A record. */
+  nodeIp?: string;
   port?: number;
   secret?: string;
   domain?: string;
@@ -111,7 +146,8 @@ export interface ProxyCreateRequest {
   meInitRetryAttempts?: number;
 }
 
-export interface ProxyUpdateRequest {
+export interface ProxyUpdateRequest extends WebProxyFields {
+  nodeIp?: string;
   domain?: string;
   tag?: string;
   name?: string;

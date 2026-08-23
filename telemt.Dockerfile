@@ -4,8 +4,10 @@ RUN apt-get update && \
     apt-get install -y curl wget ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN ARCH=$(uname -m) && \
-    wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-x86_64-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \
+# Keep this version in sync with TELEMT_VERSION in src/config.ts.
+ARG TELEMT_VERSION=3.5.2
+
+RUN wget -qO- "https://github.com/telemt/telemt/releases/download/${TELEMT_VERSION}/telemt-x86_64-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/telemt
 
 RUN useradd -r -s /bin/false telemt && \

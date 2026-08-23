@@ -10,6 +10,7 @@ import { startNginxLogWatcher } from './services/nginx';
 import { getAllProxies, getCustomDomains, setCustomDomains, getBlacklistedIps, setBlacklistedIps } from './store';
 import { collectAllProxyStats, exportProxies, importProxies, ExportBundle } from './services/proxy';
 import { ensureXrayContainersRunning } from './services/xray';
+import { getCapabilities } from './services/capabilities';
 import { execFile } from 'child_process';
 
 const app = express();
@@ -33,6 +34,11 @@ app.post('/api/update', authMiddleware, (_req, res) => {
     }
     res.json({ success: true, output: stdout });
   });
+});
+
+// Node capabilities — lets the panel gate the WEB proxy option per node
+app.get('/api/capabilities', authMiddleware, (_req, res) => {
+  res.json(getCapabilities());
 });
 
 // Domain dictionary

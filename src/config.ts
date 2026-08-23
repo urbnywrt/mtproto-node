@@ -1,8 +1,24 @@
 import path from 'path';
 
+// Pinned explicitly instead of "latest": the WEB carrier protocol is days old and
+// breaking changes are likely. Bumping this string changes the Dockerfile hash and
+// triggers an image rebuild (see ensureProxyImage).
+export const TELEMT_VERSION = '3.5.2';
+
+// Fixed port of the private WEB listener inside each telemt container. Every proxy
+// container has its own network namespace, so a single constant cannot collide.
+// Deliberately outside 10001-19999, which is used by proxy.port and limitPortMap.
+export const TELEMT_WEB_PORT = 18080;
+
 export const config = {
   port: parseInt(process.env.PORT || '8443', 10),
   nginxPort: parseInt(process.env.NGINX_PORT || '443', 10),
+  // Second public IP dedicated to WEB proxies, used when 443 on the main IP is taken
+  // by another service (typically a remnawave/Xray node). Empty = WEB shares the main
+  // nginx listener. See PLAN.md §3.
+  webBindIp: process.env.WEB_BIND_IP || '',
+  // Cloudflare API token (Zone:DNS:Edit) for ACME DNS-01. Can be overridden per proxy.
+  cfApiToken: process.env.CF_API_TOKEN || '',
   authToken: process.env.AUTH_TOKEN || '',
   dataDir: process.env.DATA_DIR || path.join(__dirname, '..', 'data'),
   dockerNetwork: 'mtproto-net',
