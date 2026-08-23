@@ -38,6 +38,16 @@ function resolveTelemtVersion(): string {
 // Deliberately outside 10001-19999, which is used by proxy.port and limitPortMap.
 export const TELEMT_WEB_PORT = 18080;
 
+/** Where the generated decoy site is unpacked inside a WEB proxy container. */
+export const TELEMT_SITE_DIR = '/var/lib/telemt/public';
+
+/**
+ * Loopback port where nginx terminates TLS for WEB vhosts in mode 1, reached from the
+ * stream block by SNI. Not 8443: docker publishes the service node's own API there on
+ * the host, and nginx runs with host networking.
+ */
+export const NGINX_WEB_L7_PORT = 8089;
+
 export const config = {
   port: parseInt(process.env.PORT || '8443', 10),
   nginxPort: parseInt(process.env.NGINX_PORT || '443', 10),

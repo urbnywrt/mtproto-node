@@ -1,7 +1,10 @@
 import Docker from 'dockerode';
 import { Readable } from 'stream';
 import { createHash } from 'crypto';
-import { config, TELEMT_VERSION } from '../config';
+import { config, TELEMT_SITE_DIR, TELEMT_VERSION, TELEMT_WEB_PORT } from '../config';
+import { WebCarrier, WebSecretMode } from '../types';
+import { createTar } from '../utils/tar';
+import { generateSite } from './site-generator';
 import { StringDecoder } from 'string_decoder';
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -17,8 +20,8 @@ RUN ARCH=$(uname -m) && \\
     chmod +x /usr/local/bin/telemt
 
 RUN useradd -r -s /bin/false telemt && \\
-    mkdir -p /etc/telemt /opt/telemt && \\
-    chown -R telemt:telemt /etc/telemt /opt/telemt
+    mkdir -p /etc/telemt /opt/telemt /var/lib/telemt/public && \\
+    chown -R telemt:telemt /etc/telemt /opt/telemt /var/lib/telemt
 
 WORKDIR /opt/telemt
 
@@ -344,6 +347,142 @@ address = "${socks5Host}:${socks5Port}"
   return toml;
 }
 
+/**
+ * Gateway address of the mtproto-net bridge.
+ *
+ * nginx runs with host networking and dials the container's bridge address, so from
+ * inside the container every request from nginx appears to come from this gateway.
+ * telemt's WEB listener needs it as its trusted-proxy boundary.
+ */
+export async function getNetworkGateway(): Promise<string> {
+  const network = docker.getNetwork(config.dockerNetwork);
+  const info = await network.inspect();
+  const ipam = info?.IPAM?.Config?.[0];
+
+  if (ipam?.Gateway) return `${ipam.Gateway}/32`;
+  // Slightly looser but still bounded to the bridge; telemt rejects an empty list.
+  if (ipam?.Subnet) return ipam.Subnet;
+
+  throw new Error(
+    `Не удалось определить шлюз сети ${config.dockerNetwork} для web_trusted_proxy_cidrs`
+  );
+}
+
+export interface WebProxyConfigOptions {
+  secret: string;
+  domain: string;
+  /** Public IP the domain resolves to; participates in telemt's inner relay tuple. */
+  publicIp: string;
+  carrier: WebCarrier;
+  secretMode: WebSecretMode;
+  trustedProxyCidr: string;
+  /** Mode 1 shares nginx's stream listener, which hides the real client address. */
+  neutralizePerIpLimits: boolean;
+  socks5Host?: string;
+  socks5Port?: number;
+  natIp?: string;
+  options?: TelemtProxyOptions;
+}
+
+/**
+ * config.toml for a WEB proxy.
+ *
+ * Deliberately different from the fake TLS config rather than a variation of it:
+ *
+ * - No [censorship]. That section configures the fake-TLS masking path, which WEB
+ *   traffic never enters ("invalid inner handshakes close only their logical stream
+ *   and never enter the TCP masking path"). Pointing tls_domain at the operator's real
+ *   domain would be actively wrong.
+ * - No [general.modes]. telemt's documented minimal WEB config omits it; the inner
+ *   handshake is selected by the profile's secret_mode instead.
+ * - No [server] port. The listener is declared explicitly with transport = "web".
+ */
+export function generateWebConfigToml(opts: WebProxyConfigOptions): string {
+  const o = opts.options || {};
+  const bool = (value: boolean | undefined, fallback: boolean) => (value === undefined ? fallback : value);
+
+  let toml = `[general]
+use_middle_proxy = ${bool(o.useMiddleProxy, true)}
+fast_mode = ${bool(o.fastMode, true)}
+log_level = "${o.logLevel || 'silent'}"
+`;
+
+  if (opts.natIp) {
+    toml += `middle_proxy_nat_ip = "${opts.natIp}"\n`;
+  }
+
+  toml += `
+[access.users]
+user1 = "${opts.secret}"
+
+[[server.listeners]]
+ip = "0.0.0.0"
+port = ${TELEMT_WEB_PORT}
+transport = "web"
+proxy_protocol = false
+reuse_allow = false
+web_client_ip_source = "x_forwarded_for"
+web_trusted_proxy_cidrs = ["${opts.trustedProxyCidr}"]
+
+[web]
+enabled = true
+carrier = "${opts.carrier}"
+`;
+
+  if (opts.neutralizePerIpLimits) {
+    // nginx terminates TLS behind its shared stream listener here, so telemt sees one
+    // address for every client. Left at their defaults the per-IP caps would apply to
+    // the whole proxy at once (16 sessions total). Real per-IP limiting is done in the
+    // nginx stream block, where $remote_addr is the actual client. See PLAN.md §3.
+    toml += `
+[web.limits]
+max_sessions_per_ip = 128
+max_bootstraps_per_ip = 512
+`;
+  }
+
+  toml += `
+[[web.vhosts]]
+host = "${opts.domain}"
+public_addr = "${opts.publicIp}:443"
+
+[web.vhosts.decoy]
+mode = "static_directory"
+directory = "${TELEMT_SITE_DIR}"
+index = "index.html"
+
+[[web.vhosts.profiles]]
+user = "user1"
+secret_mode = "${opts.secretMode}"
+`;
+
+  // Outbound routing is independent of listener transport, so VLESS/SOCKS5 works for
+  // WEB proxies exactly as it does for fake TLS ones.
+  if (opts.natIp && opts.socks5Host && opts.socks5Port) {
+    toml += `
+[[upstreams]]
+type = "direct"
+scopes = "me"
+
+[[upstreams]]
+type = "socks5"
+address = "${opts.socks5Host}:${opts.socks5Port}"
+`;
+  } else if (!opts.natIp && opts.socks5Host && opts.socks5Port) {
+    toml += `
+[[upstreams]]
+type = "direct"
+scopes = "me, fetch"
+
+[[upstreams]]
+type = "socks5"
+address = "${opts.socks5Host}:${opts.socks5Port}"
+`;
+  }
+
+  return toml;
+}
+
 export async function createProxyContainer(
   containerName: string,
   secret: string,
@@ -407,6 +546,89 @@ export async function createProxyContainer(
   const configContent = generateConfigToml(secret, domain, listenPort, tag, resolvedSocks5Host, resolvedSocks5Port, resolvedMaskHost, natIp, options);
   const tarBuffer = createTarBuffer('config.toml', configContent);
   await container.putArchive(tarBuffer, { path: '/etc/telemt' });
+
+  await container.start();
+  return container.id;
+}
+
+export interface CreateWebProxyOptions {
+  containerName: string;
+  /** Seed for the decoy site; stable per proxy so its fingerprint does not drift. */
+  siteSeed: string;
+  secret: string;
+  domain: string;
+  publicIp: string;
+  carrier: WebCarrier;
+  secretMode: WebSecretMode;
+  neutralizePerIpLimits: boolean;
+  socks5Host?: string;
+  natIp?: string;
+  options?: TelemtProxyOptions;
+}
+
+/**
+ * Create a WEB proxy container.
+ *
+ * Separate from createProxyContainer rather than a branch inside it: the fake TLS path
+ * is in production on every node and must keep producing byte-identical configs, so it
+ * is left untouched.
+ */
+export async function createWebProxyContainer(opts: CreateWebProxyOptions): Promise<string> {
+  await ensureNetwork();
+  await ensureProxyImage();
+
+  const directSocks5 = opts.socks5Host ? parseSocks5Url(opts.socks5Host) : null;
+  let resolvedSocks5Host: string | undefined;
+  let resolvedSocks5Port: number | undefined;
+  if (opts.socks5Host) {
+    if (directSocks5) {
+      resolvedSocks5Host = directSocks5.host;
+      resolvedSocks5Port = directSocks5.port;
+    } else {
+      resolvedSocks5Host = await resolveContainerIp(opts.socks5Host);
+      resolvedSocks5Port = 10808;
+    }
+  }
+  const needsHostGateway = resolvedSocks5Host === 'host.docker.internal';
+
+  const trustedProxyCidr = await getNetworkGateway();
+
+  const container = await docker.createContainer({
+    Image: config.proxyImageName,
+    name: opts.containerName,
+    HostConfig: {
+      NetworkMode: config.dockerNetwork,
+      RestartPolicy: { Name: 'unless-stopped' },
+      // No NET_BIND_SERVICE: the WEB listener binds 18080, not a privileged port.
+      LogConfig: {
+        Type: 'json-file',
+        Config: { 'max-size': '5m', 'max-file': '2' },
+      },
+      ...(needsHostGateway ? { ExtraHosts: ['host.docker.internal:host-gateway'] } : {}),
+    },
+  });
+
+  const configContent = generateWebConfigToml({
+    secret: opts.secret,
+    domain: opts.domain,
+    publicIp: opts.publicIp,
+    carrier: opts.carrier,
+    secretMode: opts.secretMode,
+    trustedProxyCidr,
+    neutralizePerIpLimits: opts.neutralizePerIpLimits,
+    socks5Host: resolvedSocks5Host,
+    socks5Port: resolvedSocks5Port,
+    natIp: opts.natIp,
+    options: opts.options,
+  });
+  await container.putArchive(createTarBuffer('config.toml', configContent), { path: '/etc/telemt' });
+
+  // telemt loads the static snapshot at startup, so the site must be in place first.
+  const site = generateSite(opts.siteSeed);
+  await container.putArchive(
+    createTar(site.map((f) => ({ name: f.path, content: f.content }))),
+    { path: TELEMT_SITE_DIR }
+  );
 
   await container.start();
   return container.id;

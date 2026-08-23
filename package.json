@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "check:site": "node tools/site-check.js"
+    "check:site": "node tools/site-check.js",
+    "check:nginx": "node tools/nginx-check.js",
+    "check": "npm run check:site && npm run check:nginx"
   },
   "dependencies": {
     "acme-client": "^5.4.0",

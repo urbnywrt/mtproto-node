@@ -1,5 +1,5 @@
 import Docker from 'dockerode';
-import { config } from '../config';
+import { config, NGINX_WEB_L7_PORT, TELEMT_WEB_PORT } from '../config';
 import { ProxyConfig, ConnectedIpInfo } from '../types';
 import { pullImage } from './docker';
 import { createTar } from '../utils/tar';
@@ -21,13 +21,38 @@ async function resolveContainerIp(containerName: string): Promise<string> {
   throw new Error(`Cannot resolve IP for container ${containerName}`);
 }
 
-export function generateNginxConfig(proxies: ProxyConfig[], ipMap: Map<string, string> = new Map()): string {
+export interface NginxRenderOptions {
+  /**
+   * WEB domains that actually have a certificate on disk. A vhost referencing a missing
+   * ssl_certificate makes nginx reject the whole config, which would take the fake TLS
+   * proxies down with it — so a WEB proxy is simply not served until its cert exists.
+   */
+  certifiedDomains?: Set<string>;
+  /**
+   * nginx >= 1.25.1 wants `http2 on;`; older builds only understand the `http2`
+   * parameter on `listen`. Emitting the wrong one is a fatal config error, and
+   * pullImage keeps whatever nginx:latest was cached when the node was first set up.
+   */
+  http2Directive?: boolean;
+}
+
+export function generateNginxConfig(
+  proxies: ProxyConfig[],
+  ipMap: Map<string, string> = new Map(),
+  opts: NginxRenderOptions = {}
+): string {
   const runningProxies = proxies.filter((p) => p.status === 'running');
+  const certified = opts.certifiedDomains ?? new Set<string>();
+  const http2Directive = opts.http2Directive ?? true;
+
+  // WEB proxies are terminated at L7 and never appear as fake TLS stream backends.
+  const webProxies = runningProxies.filter((p) => p.type === 'web' && certified.has(p.domain));
+  const streamProxies = runningProxies.filter((p) => p.type !== 'web');
 
   // Split into SNI-based (nginxPort) vs dedicated-port proxies
   const nginxPort = config.nginxPort;
-  const sniProxies = runningProxies.filter((p) => !p.listenPort || p.listenPort === nginxPort);
-  const portProxies = runningProxies.filter((p) => p.listenPort && p.listenPort !== nginxPort);
+  const sniProxies = streamProxies.filter((p) => !p.listenPort || p.listenPort === nginxPort);
+  const portProxies = streamProxies.filter((p) => p.listenPort && p.listenPort !== nginxPort);
 
   // Helper: get target address for a proxy container
   const target = (p: ProxyConfig, port: number) => {
@@ -52,6 +77,64 @@ export function generateNginxConfig(proxies: ProxyConfig[], ipMap: Map<string, s
       return `        ${p.domain} ${target(p, nginxPort)};`;
     })
     .join('\n');
+
+  // Mode 1 routes WEB domains out of the shared stream listener by SNI into a loopback
+  // L7 vhost. Mode 2 binds its own public IP and never touches the stream block.
+  const webViaStream = !config.webBindIp;
+  const webMapEntries = webViaStream
+    ? webProxies.map((p) => `        ${p.domain} 127.0.0.1:${NGINX_WEB_L7_PORT};`).join('\n')
+    : '';
+  const allMapEntries = [mapEntries, webMapEntries].filter(Boolean).join('\n');
+
+  const webListen = config.webBindIp
+    ? `${config.webBindIp}:443`
+    : `127.0.0.1:${NGINX_WEB_L7_PORT}`;
+
+  const webServerBlocks = webProxies
+    .map((p, i) => {
+      // With the legacy syntax the http2 flag is a property of the listen socket, so
+      // repeating it on every server sharing that address is a duplicate-option error.
+      const legacyHttp2 = !http2Directive && i === 0 ? ' http2' : '';
+      return `    server {
+        listen ${webListen} ssl${legacyHttp2};
+${http2Directive ? '        http2 on;\n' : ''}        server_name ${p.domain};
+
+        # Bridge capabilities ride in the query string and bootstrap/session bearers in
+        # Authorization; telemt's deployment invariants forbid logging either.
+        access_log off;
+
+        ssl_certificate     /etc/nginx/certs/${p.domain}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/certs/${p.domain}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        # Must be >= web.limits.max_body_bytes (2 MiB).
+        client_max_body_size 2m;
+
+        # The entire vhost goes to telemt. Splitting carrier paths from the decoy site
+        # here would make authenticated and ordinary traffic observably different, which
+        # is precisely what an active probe measures.
+        location / {
+            proxy_pass http://${target(p, TELEMT_WEB_PORT)};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header Connection "";
+
+            proxy_connect_timeout 5s;
+            # Both must exceed web.timeouts.long_poll_secs (25s) or long polls are cut.
+            proxy_send_timeout 35s;
+            proxy_read_timeout 35s;
+            proxy_request_buffering off;
+            proxy_buffering off;
+            # The bridge retries through its own sequence protocol; upstream retries
+            # would replay a batch telemt has already committed.
+            proxy_next_upstream off;
+        }
+    }`;
+    })
+    .join('\n\n');
+
+  const webHttpSection = webServerBlocks ? `\n${webServerBlocks}\n` : '';
 
   // Default backend: HTML fallback
   const defaultBackend = '127.0.0.1:8088';
@@ -147,14 +230,14 @@ http {
             return 200 '${fallbackHtml}';
         }
     }
-}
+${webHttpSection}}
 
 stream {
 ${useResolver ? '    resolver 127.0.0.11 valid=10s;\n' : ''}    log_format proxy '$remote_addr [$time_local] $ssl_preread_server_name $status';
     access_log /dev/stdout proxy;
 
     map $ssl_preread_server_name $backend {
-${mapEntries}
+${allMapEntries}
         default ${defaultBackend};
     }
 
@@ -231,6 +314,49 @@ export async function ensureNginxContainer(): Promise<void> {
 
 const CERTS_PATH = '/etc/nginx/certs';
 
+async function execCollect(containerName: string, cmd: string[]): Promise<string> {
+  const container = docker.getContainer(containerName);
+  const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+  const stream = (await exec.start({})) as unknown as NodeJS.ReadableStream;
+
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    stream.on('error', reject);
+  });
+}
+
+let http2DirectiveCache: boolean | null = null;
+
+/**
+ * Whether the installed nginx wants `http2 on;` (>= 1.25.1) rather than the `http2`
+ * parameter on `listen`. Emitting the wrong form is a fatal config error, and pullImage
+ * skips the pull when an image is already present — so a long-lived node can still be
+ * running whatever nginx:latest meant when it was first set up.
+ */
+async function supportsHttp2Directive(): Promise<boolean> {
+  if (http2DirectiveCache !== null) return http2DirectiveCache;
+
+  try {
+    const output = await execCollect(config.nginxContainerName, ['nginx', '-v']);
+    const match = /nginx\/(\d+)\.(\d+)\.(\d+)/.exec(output);
+    if (match) {
+      const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+      const version = major * 1_000_000 + minor * 1_000 + patch;
+      http2DirectiveCache = version >= 1_025_001;
+      console.log(`nginx ${match[1]}.${match[2]}.${match[3]} — http2 ${http2DirectiveCache ? 'directive' : 'listen parameter'}`);
+    } else {
+      console.warn('Не удалось разобрать версию nginx, использую современный синтаксис http2');
+      http2DirectiveCache = true;
+    }
+  } catch {
+    http2DirectiveCache = true;
+  }
+
+  return http2DirectiveCache;
+}
+
 /**
  * Copy stored certificates into the nginx container.
  *
@@ -303,11 +429,29 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   const webDomains = reachableProxies.filter((p) => p.type === 'web').map((p) => p.domain);
   await pushCertificates(webDomains);
 
-  const nginxConf = generateNginxConfig(reachableProxies, ipMap);
+  const certifiedDomains = new Set(acme.listCertifiedDomains());
+  for (const domain of webDomains) {
+    if (!certifiedDomains.has(domain)) {
+      console.warn(`WEB-прокси ${domain} пока без сертификата — vhost не публикуется`);
+    }
+  }
+
+  const nginxConf = generateNginxConfig(reachableProxies, ipMap, {
+    certifiedDomains,
+    http2Directive: await supportsHttp2Directive(),
+  });
   const container = docker.getContainer(config.nginxContainerName);
 
   const tarStream = createTarBuffer('nginx.conf', nginxConf);
   await container.putArchive(tarStream, { path: '/etc/nginx' });
+
+  // nginx validates before applying, so a bad config leaves the running one in place.
+  // Check explicitly anyway: otherwise the failure is silent and the node keeps serving
+  // a stale config while believing it applied a new one.
+  const test = await execCollect(config.nginxContainerName, ['nginx', '-t']);
+  if (!/syntax is ok/i.test(test) || !/test is successful/i.test(test)) {
+    throw new Error(`nginx отверг конфигурацию, изменения не применены:\n${test.trim()}`);
+  }
 
   const exec = await container.exec({
     Cmd: ['nginx', '-s', 'reload'],
