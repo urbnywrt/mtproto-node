@@ -346,6 +346,40 @@ export function extractListens(conf: string): Map<string, Set<string>> {
 }
 
 /**
+ * Sockets nginx is actually listening on, read from /proc/net/tcp inside its container.
+ *
+ * nginx uses host networking, so its /proc/net/tcp is the host's. This is ground truth,
+ * which the config file on disk is not: if a previous reload failed to bind, the file
+ * says one thing and the running process another — precisely the state this check has
+ * to detect. The image has no ss or netstat, hence /proc.
+ */
+async function getBoundListeners(): Promise<Map<string, Set<string>>> {
+  const bound = new Map<string, Set<string>>();
+  const raw = await execCollect(config.nginxContainerName, ['cat', '/proc/net/tcp']).catch(() => '');
+
+  for (const line of raw.split('\n').slice(1)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 4) continue;
+    // st == 0A is TCP_LISTEN.
+    if (fields[3] !== '0A') continue;
+
+    const [hexIp, hexPort] = fields[1].split(':');
+    if (!hexIp || !hexPort || hexIp.length !== 8) continue;
+
+    // The address is little-endian, so the octets read back to front.
+    const octets = [6, 4, 2, 0].map((i) => parseInt(hexIp.slice(i, i + 2), 16));
+    if (octets.some(Number.isNaN)) continue;
+    const address = octets.join('.');
+    const port = String(parseInt(hexPort, 16));
+
+    if (!bound.has(port)) bound.set(port, new Set());
+    bound.get(port)!.add(address);
+  }
+
+  return bound;
+}
+
+/**
  * Whether applying `next` requires restarting nginx rather than reloading it.
  *
  * A reload cannot rebind a port whose address changed: the old workers still hold the
@@ -357,8 +391,8 @@ export function extractListens(conf: string): Map<string, Set<string>> {
  * Ports that only appear on one side are fine: adding a brand-new listener or dropping
  * an old one is something reload handles.
  */
-export function requiresRestart(current: string, next: string): boolean {
-  const before = extractListens(current);
+export function requiresRestart(current: string | Map<string, Set<string>>, next: string): boolean {
+  const before = typeof current === 'string' ? extractListens(current) : current;
   const after = extractListens(next);
 
   for (const [port, addresses] of after) {
@@ -485,9 +519,10 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   });
   const container = docker.getContainer(config.nginxContainerName);
 
-  // Read the live config before overwriting it, to decide reload vs restart.
-  const currentConf = await execCollect(config.nginxContainerName, ['cat', '/etc/nginx/nginx.conf']).catch(() => '');
-  const mustRestart = currentConf ? requiresRestart(currentConf, nginxConf) : false;
+  // Compare against the sockets nginx actually holds, not the config file: after a
+  // failed reload the file already describes a state the process never reached.
+  const boundNow = await getBoundListeners();
+  const mustRestart = boundNow.size > 0 && requiresRestart(boundNow, nginxConf);
 
   const tarStream = createTarBuffer('nginx.conf', nginxConf);
   await container.putArchive(tarStream, { path: '/etc/nginx' });

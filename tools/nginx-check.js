@@ -115,6 +115,17 @@ console.log('\nReload или рестарт при смене слушающих
   check('удаление порта — хватает reload', !requiresRestart(wildcardPlus, wildcard443));
   check('без изменений — хватает reload', !requiresRestart(wildcard443, wildcard443));
   check('переход режим 1 -> режим 2 требует рестарта', requiresRestart(wildcardPlus, modeTwo));
+
+  // In practice the "current" side comes from /proc/net/tcp, which also lists sockets
+  // owned by other processes. Ports the config does not mention must be ignored.
+  const boundNow = new Map([
+    ['443', new Set(['0.0.0.0'])],
+    ['8088', new Set(['127.0.0.1'])],
+    ['22', new Set(['0.0.0.0'])],
+    ['8443', new Set(['0.0.0.0'])],
+  ]);
+  check('чужие порты в /proc не вызывают рестарт', !requiresRestart(boundNow, 'server { listen 443; }\nserver { listen 127.0.0.1:8088; }'));
+  check('фактическое состояние важнее файла конфига', requiresRestart(boundNow, modeTwo));
 }
 
 console.log('\nСинтаксис http2');
