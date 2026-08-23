@@ -327,6 +327,51 @@ async function execCollect(containerName: string, cmd: string[]): Promise<string
   });
 }
 
+/** Map of port -> set of bind addresses declared by `listen` directives. */
+export function extractListens(conf: string): Map<string, Set<string>> {
+  const listens = new Map<string, Set<string>>();
+  // Strip comments so a directive mentioned in prose cannot be picked up as real.
+  const cleaned = conf.replace(/#[^\n]*/g, '');
+
+  for (const match of cleaned.matchAll(/\blisten\s+([^;{}]+);/g)) {
+    const target = match[1].trim().split(/\s+/)[0];
+    const idx = target.lastIndexOf(':');
+    const address = idx === -1 ? '0.0.0.0' : target.slice(0, idx);
+    const port = idx === -1 ? target : target.slice(idx + 1);
+    if (!listens.has(port)) listens.set(port, new Set());
+    listens.get(port)!.add(address);
+  }
+
+  return listens;
+}
+
+/**
+ * Whether applying `next` requires restarting nginx rather than reloading it.
+ *
+ * A reload cannot rebind a port whose address changed: the old workers still hold the
+ * socket, so binding e.g. 213.165.44.205:443 while 0.0.0.0:443 is held fails with
+ * EADDRINUSE. nginx then keeps the old configuration — and `nginx -s reload` still
+ * exits 0, with the error going only to the master's stderr. Silent, and exactly what
+ * happens when a node switches between the two 443 schemes.
+ *
+ * Ports that only appear on one side are fine: adding a brand-new listener or dropping
+ * an old one is something reload handles.
+ */
+export function requiresRestart(current: string, next: string): boolean {
+  const before = extractListens(current);
+  const after = extractListens(next);
+
+  for (const [port, addresses] of after) {
+    const previous = before.get(port);
+    if (!previous) continue;
+    if (previous.size !== addresses.size || [...addresses].some((a) => !previous.has(a))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 let http2DirectiveCache: boolean | null = null;
 
 /**
@@ -440,6 +485,10 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   });
   const container = docker.getContainer(config.nginxContainerName);
 
+  // Read the live config before overwriting it, to decide reload vs restart.
+  const currentConf = await execCollect(config.nginxContainerName, ['cat', '/etc/nginx/nginx.conf']).catch(() => '');
+  const mustRestart = currentConf ? requiresRestart(currentConf, nginxConf) : false;
+
   const tarStream = createTarBuffer('nginx.conf', nginxConf);
   await container.putArchive(tarStream, { path: '/etc/nginx' });
 
@@ -449,6 +498,12 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
   const test = await execCollect(config.nginxContainerName, ['nginx', '-t']);
   if (!/syntax is ok/i.test(test) || !/test is successful/i.test(test)) {
     throw new Error(`nginx отверг конфигурацию, изменения не применены:\n${test.trim()}`);
+  }
+
+  if (mustRestart) {
+    console.log('Набор слушающих адресов nginx изменился — рестарт вместо reload');
+    await container.restart();
+    return;
   }
 
   // Same reason as above: wait for the reload to actually run, not just to be started.

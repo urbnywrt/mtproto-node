@@ -98,6 +98,25 @@ const mode2 = require(path.resolve(__dirname, '../dist/services/nginx')).generat
 check('L7 слушает выделенный IP на 443', mode2.includes('listen 203.0.113.77:443 ssl'));
 check('в SNI-map WEB-домена нет', !/proxy\.example\.com 127\.0\.0\.1/.test(mode2));
 
+console.log('\nReload или рестарт при смене слушающих адресов');
+{
+  const { requiresRestart } = require(path.resolve(__dirname, '../dist/services/nginx'));
+  const wildcard443 = 'server { listen 443; }';
+  const specific443 = 'server { listen 213.165.44.205:443 ssl; }';
+  const wildcardPlus = 'server { listen 443; }\nserver { listen 9443; }';
+  const modeTwo = 'server { listen 2443; }\nserver { listen 213.165.44.205:443 ssl; }';
+
+  // The case that actually bit on the stand: old workers keep 0.0.0.0:443, the new
+  // specific bind fails with EADDRINUSE, nginx silently keeps the old config, and
+  // `nginx -s reload` still exits 0.
+  check('0.0.0.0:443 -> IP:443 требует рестарта', requiresRestart(wildcard443, specific443));
+  check('IP:443 -> 0.0.0.0:443 требует рестарта', requiresRestart(specific443, wildcard443));
+  check('добавление нового порта — хватает reload', !requiresRestart(wildcard443, wildcardPlus));
+  check('удаление порта — хватает reload', !requiresRestart(wildcardPlus, wildcard443));
+  check('без изменений — хватает reload', !requiresRestart(wildcard443, wildcard443));
+  check('переход режим 1 -> режим 2 требует рестарта', requiresRestart(wildcardPlus, modeTwo));
+}
+
 console.log('\nСинтаксис http2');
 check('современный: отдельная директива', withCert.includes('http2 on;'));
 const legacy = generateNginxConfig(mixed, webIpMap, { ...certified, http2Directive: false });
