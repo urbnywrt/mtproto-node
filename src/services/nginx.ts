@@ -380,12 +380,10 @@ export async function pushCertificates(domains: string[]): Promise<void> {
     }
 
     // putArchive extracts into an existing directory, so create it first.
-    const mkdir = await container.exec({
-      Cmd: ['mkdir', '-p', `${CERTS_PATH}/${domain}`],
-      AttachStdout: true,
-      AttachStderr: true,
-    });
-    await mkdir.start({});
+    // execCollect drains the stream to its end, which is what actually waits for the
+    // command to finish: exec.start() resolves as soon as the stream exists, so a bare
+    // await here would let putArchive run before mkdir had created anything.
+    await execCollect(config.nginxContainerName, ['mkdir', '-p', `${CERTS_PATH}/${domain}`]);
 
     const tar = createTar([
       { name: 'fullchain.pem', content: stored.cert },
@@ -453,12 +451,8 @@ export async function updateNginxConfig(proxies: ProxyConfig[]): Promise<void> {
     throw new Error(`nginx отверг конфигурацию, изменения не применены:\n${test.trim()}`);
   }
 
-  const exec = await container.exec({
-    Cmd: ['nginx', '-s', 'reload'],
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  await exec.start({});
+  // Same reason as above: wait for the reload to actually run, not just to be started.
+  await execCollect(config.nginxContainerName, ['nginx', '-s', 'reload']);
 }
 
 // Telegram DC IP ranges to filter out
