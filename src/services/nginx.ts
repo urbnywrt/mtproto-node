@@ -355,13 +355,27 @@ export function extractListens(conf: string): Map<string, Set<string>> {
  */
 async function getBoundListeners(): Promise<Map<string, Set<string>>> {
   const bound = new Map<string, Set<string>>();
-  const raw = await execCollect(config.nginxContainerName, ['cat', '/proc/net/tcp']).catch(() => '');
 
-  for (const line of raw.split('\n').slice(1)) {
+  // Only nginx's own sockets matter. /proc/net/tcp is the host's whole table, so it
+  // also lists sshd, docker-proxy and — on a node sharing 443 with another service —
+  // that service's listener. Counting those as ours would restart nginx on every
+  // config change. The container's PID namespace contains nginx alone, so the socket
+  // inodes reachable through /proc/<pid>/fd there are exactly nginx's.
+  const script =
+    'for p in /proc/[0-9]*; do for f in "$p"/fd/*; do readlink "$f" 2>/dev/null; done; done ' +
+    '| sed -n "s/^socket:\\[\\([0-9]*\\)\\]$/\\1/p" | sort -u; echo ---; cat /proc/net/tcp';
+  const raw = await execCollect(config.nginxContainerName, ['sh', '-c', script]).catch(() => '');
+
+  const [inodePart, tcpPart] = raw.split('---');
+  if (!tcpPart) return bound;
+  const ownInodes = new Set(inodePart.split('\n').map((l) => l.trim()).filter((l) => /^\d+$/.test(l)));
+
+  for (const line of tcpPart.split('\n').slice(1)) {
     const fields = line.trim().split(/\s+/);
-    if (fields.length < 4) continue;
+    if (fields.length < 10) continue;
     // st == 0A is TCP_LISTEN.
     if (fields[3] !== '0A') continue;
+    if (!ownInodes.has(fields[9])) continue;
 
     const [hexIp, hexPort] = fields[1].split(':');
     if (!hexIp || !hexPort || hexIp.length !== 8) continue;

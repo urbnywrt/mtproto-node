@@ -191,6 +191,25 @@ export async function issueCertificate(
 }
 
 /**
+ * Retry issuance once after a short pause.
+ *
+ * Observed on a freshly created domain: the first order came back with
+ * "Unable to update challenge :: authorization must be pending", and an immediate
+ * manual retry succeeded. Creating a proxy is exactly when the DNS record is newest,
+ * so this transient lands on the most common path — and without a retry it leaves the
+ * operator with a proxy that looks broken until the 12-hour timer comes round.
+ */
+async function withOneRetry<T>(attempt: () => Promise<T>): Promise<T> {
+  try {
+    return await attempt();
+  } catch (err: any) {
+    console.warn(`ACME: первая попытка не удалась (${err?.message || err}), повтор через 10 с`);
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+    return attempt();
+  }
+}
+
+/**
  * Ensure a WEB proxy has a usable certificate, issuing or renewing as needed.
  * Certificate state is mirrored onto the proxy record so the panel can show it.
  * Returns true when the certificate on disk changed and nginx needs a reload.
@@ -216,7 +235,7 @@ export async function ensureCertificate(proxy: ProxyConfig): Promise<boolean> {
   try {
     const token = resolveToken(proxy);
     console.log(`ACME: выпуск сертификата для ${proxy.domain}...`);
-    const issued = await issueCertificate(proxy.domain, proxy.acmeEmail, token);
+    const issued = await withOneRetry(() => issueCertificate(proxy.domain, proxy.acmeEmail!, token));
     if (issued.staging) console.warn(`ACME: ${proxy.domain} использует staging-сертификат, клиенты ему не доверяют`);
     store.updateProxy(proxy.id, {
       certStatus: 'active',
