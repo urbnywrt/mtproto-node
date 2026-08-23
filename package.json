@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "check:site": "node tools/site-check.js"
   },
   "dependencies": {
     "acme-client": "^5.4.0",
