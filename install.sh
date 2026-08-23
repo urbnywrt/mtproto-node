@@ -6,7 +6,10 @@ CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-REPO_URL="https://github.com/danielVNru/mtproto-node.git"
+# Репозиторий, откуда ставится и куда потом смотрит origin.
+# Переопределяется переменной окружения, чтобы можно было ставить с форка:
+#   REPO_URL=https://github.com/<вы>/mtproto-node.git bash install.sh
+REPO_URL="${REPO_URL:-https://github.com/danielVNru/mtproto-node.git}"
 INSTALL_DIR="/opt/mtproto-node"
 
 echo -e "${CYAN}========================================${NC}"

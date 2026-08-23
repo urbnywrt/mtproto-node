@@ -10,17 +10,53 @@ fake TLS прокси: их ссылки, порты и домены остаю�
 
 ## 0. Перед началом
 
-**Ветку нужно запушить.** `update.sh` делает `git fetch origin <ветка>`,
-поэтому `feature/web-proxy` должна быть на GitHub:
+### 0.1 Запушить ветку в форк
+
+`update.sh` делает `git fetch origin <ветка>`, поэтому ветка должна быть на GitHub:
 
 ```bash
 git push -u origin feature/web-proxy
 ```
 
-Дальше либо обновляетесь с ветки (`--b=feature/web-proxy`), либо сперва
-сливаете её в `master` и обновляетесь как обычно.
+Форк `urbnywrt/mtproto-node` на момент написания идентичен апстриму
+`danielVNru/mtproto-node` (0 коммитов вперёд, 0 назад), и ветка основана ровно
+на том, что развёрнуто на боевых нодах. Обновление ничего не откатит назад.
 
-**Сделайте резервную копию стора на каждой ноде:**
+### 0.2 Перенаправить origin на форк — обязательно
+
+`install.sh` зашивал адрес репозитория автора, поэтому на боевых серверах
+`origin` смотрит на `danielVNru/*`. Ветки `feature/web-proxy` там нет и быть
+не может, так что `update.sh --b=...` упадёт на `git fetch`.
+
+На каждом сервере, один раз:
+
+```bash
+cd /opt/mtproto-node
+git remote -v                      # убедиться, что сейчас там danielVNru
+git remote set-url origin https://github.com/urbnywrt/mtproto-node.git
+git fetch origin
+```
+
+Для панели — то же самое с `mtproto-panel`.
+
+После этого все последующие обновления берутся из форка. Чтобы подтянуть
+изменения автора, добавьте апстрим отдельным remote и вливайте в форк:
+
+```bash
+git remote add upstream https://github.com/danielVNru/mtproto-node.git
+```
+
+Для **новых** нод `REPO_URL` теперь переопределяется, и переставлять origin
+руками не придётся:
+
+```bash
+REPO_URL=https://github.com/urbnywrt/mtproto-node.git bash install.sh
+```
+
+### 0.3 Резервная копия
+
+`update.sh` делает `git reset --hard`, то есть любые правки файлов прямо
+на сервере будут потеряны. Стор при этом не трогается, но скопировать стоит:
 
 ```bash
 cp /opt/mtproto-node/data/store.json /opt/mtproto-node/data/store.json.bak
