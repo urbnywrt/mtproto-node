@@ -60,6 +60,11 @@ export function generateNginxConfig(
     return ip ? `${ip}:${port}` : `${p.containerName}:${port}`;
   };
 
+  // Port telemt actually listens on. Falls back to the caller's port for records
+  // predating containerPort, which keeps output identical for existing proxies.
+  const streamTarget = (p: ProxyConfig, fallbackPort: number) =>
+    target(p, p.containerPort ?? fallbackPort);
+
   // For SNI proxies with connection limits, assign internal loopback ports (10001+)
   const limitSniProxies = sniProxies.filter((p) => p.maxConnections && p.maxConnections > 0);
   const limitPortMap = new Map<string, number>();
@@ -74,7 +79,7 @@ export function generateNginxConfig(
       if (internalPort) {
         return `        ${p.domain} 127.0.0.1:${internalPort};`;
       }
-      return `        ${p.domain} ${target(p, nginxPort)};`;
+      return `        ${p.domain} ${streamTarget(p, nginxPort)};`;
     })
     .join('\n');
 
@@ -160,7 +165,7 @@ ${denyEntries ? denyEntries + '\n' : ''}    }`;
       return `    limit_conn_zone $remote_addr zone=${zoneName}:1m;
     server {
         listen 127.0.0.1:${internalPort};
-        proxy_pass ${target(p, nginxPort)};
+        proxy_pass ${streamTarget(p, nginxPort)};
         proxy_connect_timeout 10s;
         proxy_timeout 300s;
         limit_conn ${zoneName} ${p.maxConnections};
@@ -184,7 +189,7 @@ ${denyEntries ? denyEntries + '\n' : ''}    }`;
     limit_conn_zone $remote_addr zone=port_${p.listenPort}:1m;
     server {
         listen ${p.listenPort};
-        proxy_pass ${target(p, p.listenPort!)};
+        proxy_pass ${streamTarget(p, p.listenPort!)};
         ssl_preread on;
         proxy_connect_timeout 10s;
         proxy_timeout 300s;
@@ -194,7 +199,7 @@ ${denyEntries ? denyEntries + '\n' : ''}        limit_conn port_${p.listenPort} 
       return `
     server {
         listen ${p.listenPort};
-        proxy_pass ${target(p, p.listenPort!)};
+        proxy_pass ${streamTarget(p, p.listenPort!)};
         ssl_preread on;
         proxy_connect_timeout 10s;
         proxy_timeout 300s;

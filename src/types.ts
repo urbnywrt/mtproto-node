@@ -40,6 +40,14 @@ export interface ProxyConfig extends WebProxyFields {
    */
   domain: string;
   type: ProxyType;
+  /**
+   * Port telemt listens on inside its container, fixed when the container was created.
+   * nginx must target this rather than the current NGINX_PORT: changing NGINX_PORT
+   * later would otherwise point the upstream at a port nothing is listening on, and
+   * every existing fake TLS proxy on the node would silently stop answering.
+   * Absent on records created before this field existed.
+   */
+  containerPort?: number;
   certStatus?: CertStatus;
   certExpiresAt?: string;
   certLastError?: string;

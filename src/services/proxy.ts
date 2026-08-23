@@ -180,6 +180,7 @@ export async function createProxy(req: ProxyCreateRequest): Promise<ProxyConfig>
     vpnContainerName,
     ...persistable,
     type: req.type || 'faketls',
+    containerPort: req.listenPort || config.nginxPort,
     natIp: req.natIp || config.natIp || undefined,
     tunnelInterface: req.tunnelInterface || config.tunnelInterface || undefined,
   };
