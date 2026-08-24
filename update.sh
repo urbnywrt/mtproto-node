@@ -14,9 +14,13 @@ echo ""
 
 # Парсим аргументы
 FORCE_BRANCH=""
+FORCE_BUILD=0
+FORCE_PULL=0
 for arg in "$@"; do
     case "$arg" in
         --b=*) FORCE_BRANCH="${arg#--b=}" ;;
+        --build) FORCE_BUILD=1 ;;
+        --pull) FORCE_PULL=1 ;;
     esac
 done
 
@@ -68,11 +72,12 @@ echo -e "${CYAN}[3/5] Получение обновлений из репози�
 git stash --include-untracked 2>/dev/null || true
 
 # Определяем ветку (из аргумента или автоматически)
+DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}')
+DEFAULT_BRANCH=${DEFAULT_BRANCH:-master}
 if [ -n "$FORCE_BRANCH" ]; then
     BRANCH="$FORCE_BRANCH"
 else
-    BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}')
-    BRANCH=${BRANCH:-master}
+    BRANCH="$DEFAULT_BRANCH"
 fi
 echo -e "  Ветка: ${YELLOW}${BRANCH}${NC}"
 
@@ -84,8 +89,20 @@ echo -e "${CYAN}[4/5] Загрузка и запуск обновлённой с
 export COMPOSE_PROJECT_NAME=mtproto-node
 docker network create mtproto-net 2>/dev/null || true
 
-echo -e "  Загрузка образа из GHCR..."
-if docker compose pull 2>/dev/null; then
+# Готовые образы в GHCR собираются только с веток master и dev. Взять оттуда образ,
+# обновившись с любой другой ветки, значит запустить чужой код поверх её исходников —
+# молча и без единой ошибки. Поэтому с явно указанной веткой собираем локально.
+USE_BUILD=0
+if [ "$FORCE_BUILD" -eq 1 ]; then
+    USE_BUILD=1
+elif [ "$FORCE_PULL" -eq 0 ] && [ "$BRANCH" != "master" ] && [ "$BRANCH" != "dev" ] && [ "$BRANCH" != "$DEFAULT_BRANCH" ]; then
+    USE_BUILD=1
+    echo -e "${YELLOW}  Ветка ${BRANCH} не публикуется в GHCR — собираем образ локально${NC}"
+fi
+
+if [ "$USE_BUILD" -eq 1 ]; then
+    docker compose build
+elif docker compose pull 2>/dev/null; then
     echo -e "  ${GREEN}Образ загружен из GHCR${NC}"
 else
     echo -e "${YELLOW}  Не удалось загрузить образ, собираем локально...${NC}"
