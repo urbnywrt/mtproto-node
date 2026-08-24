@@ -7,6 +7,14 @@ import { ProxyConfig } from '../types';
 import * as store from '../store';
 import * as cloudflare from './cloudflare';
 
+/**
+ * acme-client ships with axios configured for no timeout at all, so a stalled request
+ * to the ACME directory hangs forever. Observed in production as issuance going silent
+ * after the challenge was published: no success, no error, nothing to act on. A bounded
+ * request turns that into an ordinary failure that reaches certLastError.
+ */
+acme.axios.defaults.timeout = 30000;
+
 const CERTS_DIR = path.join(config.dataDir, 'certs');
 const ACCOUNT_KEY_FILE = path.join(config.dataDir, 'acme', 'account.key');
 
@@ -194,6 +202,13 @@ export async function issueCertificate(
       email,
       termsOfServiceAgreed: true,
       challengePriority: ['dns-01'],
+      // acme-client verifies the challenge itself before handing it to the CA, using
+      // the system resolver over UDP/53. On a host where that is blocked the check
+      // cannot succeed, and it retries ten times with up to 30s backoff — several
+      // minutes of complete silence, then a failure that says nothing useful.
+      // waitForTxtRecord above already does this over DoH, and the CA performs the
+      // authoritative check regardless, so the local one is redundant.
+      skipChallengeVerification: true,
       challengeCreateFn: async (authz, challenge, keyAuthorization) => {
         if (challenge.type !== 'dns-01') throw new Error(`Неожиданный тип челленджа: ${challenge.type}`);
         const recordName = `_acme-challenge.${authz.identifier.value}`;
