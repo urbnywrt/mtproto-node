@@ -41,6 +41,12 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
+# Порт API берём из .env: compose публикует именно его, а проверка готовности
+# ниже раньше использовала дефолт 8443 и на ноде с другим PORT не проходила
+# никогда — обновление завершалось ошибкой при полностью исправной ноде.
+PORT=$(grep '^PORT=' .env | cut -d'=' -f2)
+PORT=${PORT:-8443}
+
 echo -e "${CYAN}[1/5] Получение списка запущенных прокси...${NC}"
 
 # Запоминаем ID запущенных прокси-контейнеров (mtproto-proxy-*)
@@ -98,7 +104,7 @@ fi
 echo -e "  Ожидание запуска API сервис-ноды..."
 READY=0
 for _ in $(seq 1 30); do
-    if curl -fsS "http://localhost:${PORT:-8443}/api/health" >/dev/null 2>&1; then
+    if curl -fsS "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
         READY=1
         break
     fi
@@ -139,8 +145,6 @@ echo -e "${CYAN}[5/5] Восстановление прокси...${NC}"
 
 # Читаем токен из .env
 AUTH_TOKEN=$(grep '^AUTH_TOKEN=' .env | cut -d'=' -f2)
-PORT=$(grep '^PORT=' .env | cut -d'=' -f2)
-PORT=${PORT:-8443}
 
 # Получаем список прокси из API и запускаем остановленные
 PROXIES_RESPONSE=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "http://localhost:${PORT}/api/proxies" 2>/dev/null || echo "[]")
