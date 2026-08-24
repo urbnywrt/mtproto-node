@@ -39,6 +39,17 @@ const proxies = [
     domain: 'web2.example.net', containerName: 'c4', status: 'running', createdAt: 'x',
     trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'web', webSecretMode: 'dd',
   },
+  {
+    // Created before webPublicIp was recorded — the case that broke on the first node.
+    id: 'w3', name: 'web-legacy', note: '', port: 10005, secret: SECRET,
+    domain: 'legacy.example.com', containerName: 'c5', status: 'running', createdAt: 'x',
+    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'web',
+  },
+  {
+    id: 'w4', name: 'web-unresolvable', note: '', port: 10006, secret: SECRET,
+    domain: 'gone.example.com', containerName: 'c6', status: 'running', createdAt: 'x',
+    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'web',
+  },
 ];
 fs.writeFileSync(path.join(DATA_DIR, 'store.json'), JSON.stringify({ proxies }));
 
@@ -46,16 +57,18 @@ fs.writeFileSync(path.join(DATA_DIR, 'store.json'), JSON.stringify({ proxies }))
 // picks, which is exactly what cannot be seen from the outside once a container is
 // running — a WEB proxy rebuilt as fake TLS looks alive and answers 502 to everything.
 const calls = [];
+let dnsAnswer = ['203.0.113.55'];
 function stub(rel, exports) {
   const id = require.resolve(path.resolve(__dirname, rel));
   require.cache[id] = { id, filename: id, loaded: true, exports };
 }
 stub('../dist/services/docker', {
-  removeProxyContainer: async () => {},
+  removeProxyContainer: async (name) => { calls.push({ kind: 'remove', name }); },
   createProxyContainer: async (...args) => { calls.push({ kind: 'faketls', args }); return 'id'; },
   createWebProxyContainer: async (opts) => { calls.push({ kind: 'web', opts }); return 'id'; },
 });
 stub('../dist/services/nginx', { updateNginxConfig: async () => {} });
+stub('../dist/services/dns', { lookupA: async () => dnsAnswer, lookupTxt: async () => [] });
 stub('../dist/services/acme', {
   ensureCertificate: async () => {},
   removeCertificate: () => {},
@@ -103,31 +116,48 @@ const invalid = [
 for (const d of valid) check(`валиден: ${d}`, isValidWebDomain(d) === true);
 for (const d of invalid) check(`отвергнут: ${JSON.stringify(d)}`, isValidWebDomain(d) === false);
 
+const built = () => calls.filter((c) => c.kind !== 'remove');
+
 (async () => {
   console.log('\nПересборка контейнера выбирает генератор по типу:');
 
   calls.length = 0;
   await proxyService.restartProxy('w1');
-  check('restart WEB-прокси идёт через WEB-генератор', calls.length === 1 && calls[0].kind === 'web',
+  check('restart WEB-прокси идёт через WEB-генератор', built().length === 1 && built()[0].kind === 'web',
     JSON.stringify(calls.map((c) => c.kind)));
   check('restart WEB сохраняет домен и публичный IP',
-    !!(calls[0] && calls[0].kind === 'web' && calls[0].opts.domain === 'proxy.example.com' && calls[0].opts.publicIp === '203.0.113.10'),
-    JSON.stringify(calls[0] && calls[0].opts));
-  check('restart WEB сохраняет seed сайта-прикрытия', !!(calls[0] && calls[0].opts && calls[0].opts.siteSeed === 'w1'));
+    !!(built()[0] && built()[0].kind === 'web' && built()[0].opts.domain === 'proxy.example.com' && built()[0].opts.publicIp === '203.0.113.10'),
+    JSON.stringify(built()[0] && built()[0].opts));
+  check('restart WEB сохраняет seed сайта-прикрытия', !!(built()[0] && built()[0].opts && built()[0].opts.siteSeed === 'w1'));
 
   calls.length = 0;
   await proxyService.restartProxy('ft1');
-  check('restart fake TLS идёт через прежний генератор', calls.length === 1 && calls[0].kind === 'faketls',
+  check('restart fake TLS идёт через прежний генератор', built().length === 1 && built()[0].kind === 'faketls',
     JSON.stringify(calls.map((c) => c.kind)));
 
   calls.length = 0;
   await proxyService.restartProxy('ft2');
-  check('restart сохраняет NAT IP самого прокси', !!(calls[0] && calls[0].args && calls[0].args[7] === '198.51.100.9'),
-    JSON.stringify(calls[0] && calls[0].args[7]));
+  check('restart сохраняет NAT IP самого прокси', !!(built()[0] && built()[0].args && built()[0].args[7] === '198.51.100.9'),
+    JSON.stringify(built()[0] && built()[0].args[7]));
 
   calls.length = 0;
   await proxyService.updateProxy('w1', { natIp: '198.51.100.7' });
-  check('update WEB-прокси идёт через WEB-генератор', calls.length === 1 && calls[0].kind === 'web',
+  check('update WEB-прокси идёт через WEB-генератор', built().length === 1 && built()[0].kind === 'web',
+    JSON.stringify(calls.map((c) => c.kind)));
+
+  calls.length = 0;
+  await proxyService.restartProxy('w3');
+  check('WEB без webPublicIp берёт адрес из A-записи домена',
+    !!(built()[0] && built()[0].opts && built()[0].opts.publicIp === '203.0.113.55'),
+    JSON.stringify(built()[0] && built()[0].opts && built()[0].opts.publicIp));
+
+  calls.length = 0;
+  dnsAnswer = [];
+  let threw = false;
+  try { await proxyService.restartProxy('w4'); } catch (e) { threw = true; }
+  dnsAnswer = ['203.0.113.55'];
+  check('без публичного IP пересборка отказывает', threw);
+  check('отказ не удаляет работающий контейнер', calls.length === 0,
     JSON.stringify(calls.map((c) => c.kind)));
 
   fs.rmSync(DATA_DIR, { recursive: true, force: true });

@@ -9,6 +9,7 @@ import type { TelemtProxyOptions } from './docker';
 import * as nginxService from './nginx';
 import * as preflightService from './preflight';
 import * as xrayService from './xray';
+import { lookupA } from './dns';
 
 /**
  * WEB proxies take a separate path: the domain is the operator's own rather than one
@@ -244,6 +245,27 @@ interface RebuildOptions {
 }
 
 /**
+ * The address telemt bakes into a WEB vhost's public_addr.
+ *
+ * WEB proxies created before this value was stored have nothing on record, so the
+ * domain's own A record stands in: preflight checked it against the node at creation,
+ * which makes it the same address. Recovering it beats refusing to rebuild a proxy that
+ * is otherwise intact.
+ */
+async function resolveWebPublicIp(proxy: ProxyConfig, domain: string): Promise<string> {
+  const known = config.webBindIp || config.publicIp || proxy.webPublicIp;
+  if (known) return known;
+
+  const addresses = await lookupA(domain).catch(() => [] as string[]);
+  if (addresses.length > 0) return addresses[0];
+
+  throw new Error(
+    `Не известен публичный IP для WEB-прокси: ${domain} не резолвится в A-запись, ` +
+      'а PUBLIC_IP на ноде не задан. Пропишите PUBLIC_IP в .env ноды.'
+  );
+}
+
+/**
  * Recreates a proxy's container with the generator its type requires, returning the
  * public IP baked into a WEB container's config.
  *
@@ -257,21 +279,20 @@ interface RebuildOptions {
 async function rebuildContainer(proxy: ProxyConfig, o: RebuildOptions): Promise<string | undefined> {
   const domain = o.domain || proxy.domain;
 
+  // Resolved before the running container is touched: a failure here must leave the
+  // proxy serving rather than delete it and only then refuse to rebuild.
+  const publicIp = proxy.type === 'web' ? await resolveWebPublicIp(proxy, domain) : undefined;
+
+  await dockerService.removeProxyContainer(proxy.containerName).catch(() => {});
+
   if (proxy.type === 'web') {
-    const publicIp = config.webBindIp || config.publicIp || proxy.webPublicIp || '';
-    if (!publicIp) {
-      throw new Error(
-        'Не известен публичный IP для WEB-прокси. Задайте PUBLIC_IP на ноде ' +
-          'или пересоздайте прокси.'
-      );
-    }
     await dockerService.createWebProxyContainer({
       containerName: proxy.containerName,
       // Same seed as at creation, so the decoy site keeps its fingerprint.
       siteSeed: proxy.id,
       secret: proxy.secret,
       domain,
-      publicIp,
+      publicIp: publicIp!,
       carrier: (o.carrier || proxy.webCarrier || 'https-lanes') as WebCarrier,
       secretMode: (o.secretMode || proxy.webSecretMode || 'plain') as WebSecretMode,
       // Mode 1 shares nginx's stream listener, so telemt cannot see real client IPs.
@@ -401,7 +422,6 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
   }
 
   if (needsRestart) {
-    await dockerService.removeProxyContainer(proxy.containerName);
     const effectiveNatIp = updates.natIp !== undefined ? updates.natIp : (proxy.natIp || config.natIp || undefined);
 
     const publicIp = await rebuildContainer(proxy, {
@@ -433,9 +453,6 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
 export async function restartProxy(id: string): Promise<ProxyConfig | undefined> {
   const proxy = store.getProxyById(id);
   if (!proxy) return undefined;
-
-  // Удаляем старый контейнер если существует
-  await dockerService.removeProxyContainer(proxy.containerName).catch(() => {});
 
   // Создаём контейнер заново (с VPN если настроен), генератором своего типа.
   const publicIp = await rebuildContainer(proxy, {
