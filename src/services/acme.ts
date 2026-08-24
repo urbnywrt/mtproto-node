@@ -1,11 +1,11 @@
 import acme from 'acme-client';
 import fs from 'fs';
 import path from 'path';
-import { Resolver } from 'dns/promises';
 import { config } from '../config';
 import { ProxyConfig } from '../types';
 import * as store from '../store';
 import * as cloudflare from './cloudflare';
+import { lookupTxt } from './dns';
 
 /**
  * acme-client ships with axios configured for no timeout at all, so a stalled request
@@ -91,65 +91,18 @@ async function loadAccountKey(): Promise<Buffer> {
 }
 
 /**
- * Look up TXT records over DNS-over-HTTPS.
- *
- * The classic resolver needs outbound UDP/53, which is not available on every host —
- * observed in production as ETIMEOUT against 1.1.1.1 and 8.8.8.8, which made WEB proxy
- * creation impossible there. DoH rides on 443, and the node already has to reach the
- * Cloudflare API over 443 for this feature to work at all.
- */
-async function queryTxtOverHttps(name: string): Promise<string[]> {
-  const endpoints = [
-    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`,
-    `https://dns.google/resolve?name=${encodeURIComponent(name)}&type=TXT`,
-  ];
-
-  for (const url of endpoints) {
-    try {
-      const response = await fetch(url, {
-        headers: { accept: 'application/dns-json' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!response.ok) continue;
-
-      const body = (await response.json()) as { Answer?: Array<{ type: number; data: string }> };
-      const values = (body.Answer || [])
-        .filter((a) => a.type === 16)
-        // TXT data arrives quoted, and long values as several quoted chunks.
-        .map((a) => a.data.replace(/"\s+"/g, '').replace(/^"|"$/g, ''));
-      if (values.length > 0) return values;
-    } catch {
-      // Try the next endpoint.
-    }
-  }
-
-  return [];
-}
-
-async function queryTxtOverUdp(name: string): Promise<string[]> {
-  const resolver = new Resolver({ timeout: 5000, tries: 2 });
-  resolver.setServers(['1.1.1.1', '8.8.8.8']);
-  try {
-    return (await resolver.resolveTxt(name)).map((chunks) => chunks.join(''));
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Wait until the challenge TXT record is visible from public resolvers.
  *
- * Best effort on purpose: Let's Encrypt queries the authoritative nameservers itself,
- * so this only reduces the chance of a premature order. Failing to confirm is not
- * proof the record is missing — the lookup itself may be blocked — so on timeout it
- * warns and proceeds rather than abandoning an issuance that would have succeeded.
+ * Best effort on purpose: the CA queries the authoritative nameservers itself, so this
+ * only reduces the chance of a premature order. Failing to confirm is not proof the
+ * record is missing — the lookup itself may be blocked — so on timeout it warns and
+ * proceeds rather than abandoning an issuance that would have succeeded.
  */
 async function waitForTxtRecord(name: string, expected: string): Promise<void> {
   const deadline = Date.now() + 120000;
 
   while (Date.now() < deadline) {
-    const [doh, udp] = await Promise.all([queryTxtOverHttps(name), queryTxtOverUdp(name)]);
-    if ([...doh, ...udp].includes(expected)) return;
+    if ((await lookupTxt(name)).includes(expected)) return;
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 

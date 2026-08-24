@@ -6,16 +6,31 @@ interface CfResponse<T> {
   result: T;
 }
 
+/** Raised when the request never reached Cloudflare, as opposed to being refused by it. */
+export class CloudflareUnreachableError extends Error {}
+
 async function cf<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${CF_API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(init.headers as Record<string, string>),
-    },
-    signal: AbortSignal.timeout(20000),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${CF_API}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...(init.headers as Record<string, string>),
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (err: any) {
+    // fetch throws the same opaque "fetch failed" for a blocked port, a refused
+    // connection and a name that does not resolve. Reporting that as a rejected token
+    // sends the operator hunting for a problem that is not there.
+    const cause = err?.cause?.code || err?.cause?.message || err?.name || '';
+    throw new CloudflareUnreachableError(
+      `не удалось связаться с api.cloudflare.com${cause ? ` (${cause})` : ''}. ` +
+        'Проверьте, что с ноды работает разрешение имён и исходящий HTTPS.'
+    );
+  }
 
   const body = (await response.json()) as CfResponse<T>;
   if (!response.ok || !body.success) {

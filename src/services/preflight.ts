@@ -1,8 +1,8 @@
 import Docker from 'dockerode';
-import { Resolver } from 'dns/promises';
 import { config } from '../config';
 import * as store from '../store';
 import * as cloudflare from './cloudflare';
+import { lookupA } from './dns';
 import { getCapabilities } from './capabilities';
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -59,21 +59,17 @@ async function getHostAddresses(): Promise<string[]> {
 }
 
 async function resolveDomain(domain: string): Promise<string[]> {
-  // Public resolvers rather than the container's, so a stale local cache or a hosts
-  // entry cannot make a misconfigured domain look correct.
-  const resolver = new Resolver({ timeout: 5000, tries: 2 });
-  resolver.setServers(['1.1.1.1', '8.8.8.8']);
-
-  try {
-    return await resolver.resolve4(domain);
-  } catch (err: any) {
-    if (err?.code === 'ENOTFOUND' || err?.code === 'ENODATA') {
-      throw new PreflightError(
-        `Домен ${domain} не резолвится в A-запись. Создайте A-запись на IP ноды и дождитесь распространения.`
-      );
-    }
-    throw new PreflightError(`Не удалось разрешить ${domain}: ${err?.code || err?.message || err}`);
+  // Same dual path as the ACME propagation check: a node whose outbound UDP/53 is
+  // blocked would otherwise fail preflight and never be able to host a WEB proxy.
+  const addresses = await lookupA(domain);
+  if (addresses.length === 0) {
+    throw new PreflightError(
+      `Домен ${domain} не резолвится в A-запись. Создайте A-запись на IP ноды ` +
+        'и дождитесь распространения. Если запись точно есть — проверьте, что с ноды ' +
+        'работает разрешение имён и исходящий HTTPS.'
+    );
   }
+  return addresses;
 }
 
 /**
@@ -151,6 +147,9 @@ export async function preflightWebProxy(input: PreflightInput): Promise<Prefligh
   try {
     await cloudflare.verifyToken(token);
   } catch (err: any) {
+    if (err instanceof cloudflare.CloudflareUnreachableError) {
+      throw new PreflightError(`Сертификат выпустить не выйдет: ${err.message}`);
+    }
     throw new PreflightError(`Токен Cloudflare отвергнут: ${err?.message || err}`);
   }
   try {
