@@ -2,7 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [master, dev]
+    branches: [master, dev, 'feature/**']
   workflow_dispatch:
 
 jobs:
@@ -17,6 +17,19 @@ jobs:
 
       - name: Set lowercase owner
         run: echo "OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      # Every branch gets its own tag so nodes can pull a build instead of compiling one.
+      # Only master and dev move :latest — a manual run from a feature branch used to
+      # publish it as :latest, which every node on master would then pull.
+      - name: Derive image tags
+        run: |
+          SLUG=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
+          if [ "$GITHUB_REF_NAME" = "master" ] || [ "$GITHUB_REF_NAME" = "dev" ]; then
+            echo "MOVE_LATEST=true" >> $GITHUB_ENV
+          else
+            echo "MOVE_LATEST=false" >> $GITHUB_ENV
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -35,7 +48,8 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ env.OWNER }}/mtproto-node:latest
+            ghcr.io/${{ env.OWNER }}/mtproto-node:${{ env.SLUG }}
             ghcr.io/${{ env.OWNER }}/mtproto-node:${{ github.sha }}
+            ${{ env.MOVE_LATEST == 'true' && format('ghcr.io/{0}/mtproto-node:latest', env.OWNER) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

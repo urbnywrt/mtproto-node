@@ -128,15 +128,18 @@ echo -e "${CYAN}[4/5] Загрузка и запуск обновлённой с
 export COMPOSE_PROJECT_NAME=mtproto-node
 docker network create mtproto-net 2>/dev/null || true
 
-# Готовые образы в GHCR собираются только с веток master и dev. Взять оттуда образ,
-# обновившись с любой другой ветки, значит запустить чужой код поверх её исходников —
-# молча и без единой ошибки. Поэтому с явно указанной веткой собираем локально.
+# Каждая ветка публикуется в GHCR под своим тегом, а :latest двигают только master и
+# dev. Тянуть :latest, обновляясь с другой ветки, значит запустить чужой код поверх её
+# исходников — молча и без единой ошибки. Поэтому для ветки берём её собственный тег.
 USE_BUILD=0
 if [ "$FORCE_BUILD" -eq 1 ]; then
     USE_BUILD=1
-elif [ "$FORCE_PULL" -eq 0 ] && [ "$BRANCH" != "master" ] && [ "$BRANCH" != "dev" ] && [ "$BRANCH" != "$DEFAULT_BRANCH" ]; then
-    USE_BUILD=1
-    echo -e "${YELLOW}  Ветка ${BRANCH} не публикуется в GHCR — собираем образ локально${NC}"
+elif [ "$FORCE_PULL" -eq 0 ] && [ "$BRANCH" != "master" ] && [ "$BRANCH" != "dev" ]; then
+    if [ -z "${IMAGE_TAG:-}" ] && ! grep -q '^IMAGE_TAG=' .env 2>/dev/null; then
+        IMAGE_TAG=$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+        export IMAGE_TAG
+        echo -e "  Тег образа для ветки: ${YELLOW}${IMAGE_TAG}${NC}"
+    fi
 fi
 
 if [ "$USE_BUILD" -eq 1 ]; then
@@ -144,7 +147,7 @@ if [ "$USE_BUILD" -eq 1 ]; then
 elif docker compose pull 2>/dev/null; then
     echo -e "  ${GREEN}Образ загружен из GHCR${NC}"
 else
-    echo -e "${YELLOW}  Не удалось загрузить образ, собираем локально...${NC}"
+    echo -e "${YELLOW}  Готового образа нет, собираем локально...${NC}"
     docker compose build
 fi
 docker compose up -d
