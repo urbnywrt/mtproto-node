@@ -53,6 +53,15 @@ export async function findZoneId(token: string, domain: string): Promise<string>
   );
 }
 
+/** Ids of every TXT record currently sitting at `name`. */
+export async function listTxtRecords(token: string, zoneId: string, name: string): Promise<string[]> {
+  const records = await cf<Array<{ id: string }>>(
+    token,
+    `/zones/${zoneId}/dns_records?type=TXT&name=${encodeURIComponent(name)}`
+  );
+  return records.map((r) => r.id);
+}
+
 export async function createTxtRecord(
   token: string,
   zoneId: string,

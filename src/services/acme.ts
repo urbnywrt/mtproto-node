@@ -197,6 +197,19 @@ export async function issueCertificate(
       challengeCreateFn: async (authz, challenge, keyAuthorization) => {
         if (challenge.type !== 'dns-01') throw new Error(`Неожиданный тип челленджа: ${challenge.type}`);
         const recordName = `_acme-challenge.${authz.identifier.value}`;
+
+        // Clear anything left at this name first. The finally block below cannot run
+        // if the process is killed mid-order — and it will be: issuance waits up to
+        // two minutes, and `update.sh` takes the container down. Without this the
+        // records accumulate on every interrupted attempt.
+        const stale = await cloudflare.listTxtRecords(token, zoneId, recordName).catch(() => []);
+        for (const staleId of stale) {
+          await cloudflare.deleteRecord(token, zoneId, staleId).catch(() => {});
+        }
+        if (stale.length > 0) {
+          console.log(`ACME: убрано ${stale.length} брошенных TXT-записей ${recordName}`);
+        }
+
         const id = await cloudflare.createTxtRecord(token, zoneId, recordName, keyAuthorization);
         created.push({ id });
         await waitForTxtRecord(recordName, keyAuthorization);
