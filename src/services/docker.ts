@@ -515,6 +515,29 @@ address = "${opts.socks5Host}:${opts.socks5Port}"
   return toml;
 }
 
+export interface UpdaterState {
+  /** No sidecar container at all — either never ran, or already cleaned up. */
+  exists: boolean;
+  running: boolean;
+  /** Exit code once finished; the only reliable way to tell success from failure. */
+  exitCode: number | null;
+}
+
+/**
+ * State of the update sidecar. The script runs outside the compose project so that
+ * `docker compose down` cannot kill it, which also means the node can come back online
+ * while the update is still restoring proxies — "node answers" is not "update done".
+ */
+export async function getUpdaterState(): Promise<UpdaterState> {
+  try {
+    const info = await docker.getContainer('mtproto-node-updater').inspect();
+    const running = info.State?.Running === true;
+    return { exists: true, running, exitCode: running ? null : info.State?.ExitCode ?? null };
+  } catch {
+    return { exists: false, running: false, exitCode: null };
+  }
+}
+
 export async function createProxyContainer(
   containerName: string,
   secret: string,

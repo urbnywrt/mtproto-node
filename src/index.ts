@@ -4,7 +4,7 @@ import { config, FAKE_TLS_DOMAINS, TELEMT_VERSION } from './config';
 import { authMiddleware } from './middleware/auth';
 import proxyRoutes from './routes/proxy';
 import healthRoutes from './routes/health';
-import { ensureNetwork, ensureProxyImage, readContainerListenPort, reconnectContainersToNetwork } from './services/docker';
+import { ensureNetwork, ensureProxyImage, getUpdaterState, readContainerListenPort, reconnectContainersToNetwork } from './services/docker';
 import { ensureNginxContainer, updateNginxConfig } from './services/nginx';
 import { startNginxLogWatcher } from './services/nginx';
 import { backfillContainerPorts, getAllProxies, getCustomDomains, setCustomDomains, getBlacklistedIps, setBlacklistedIps } from './store';
@@ -13,6 +13,8 @@ import { ensureXrayContainersRunning } from './services/xray';
 import { getCapabilities } from './services/capabilities';
 import { renewDueCertificates } from './services/acme';
 import { execFile } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 const app = express();
 
@@ -33,8 +35,25 @@ app.post('/api/update', authMiddleware, (_req, res) => {
       res.status(500).json({ success: false, error: error.message, output: stderr || stdout });
       return;
     }
-    res.json({ success: true, output: stdout });
+    // The script delegates to a sidecar container: this process is about to be replaced
+    // and cannot report the outcome itself. The panel polls /api/update/log instead.
+    res.json({ success: true, output: stdout, async: stdout.includes('mtproto-node-updater') });
   });
+});
+
+// Result of the last update. The script runs in a sidecar container and outlives this
+// process, so the panel reads the outcome after the node has come back — the HTTP
+// request that started the update cannot survive its own container being replaced.
+app.get('/api/update/log', authMiddleware, async (_req, res) => {
+  const logPath = path.join(config.dataDir, 'update.log');
+  try {
+    const updater = await getUpdaterState();
+    const output = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf-8') : '';
+    const finishedAt = fs.existsSync(logPath) ? fs.statSync(logPath).mtime.toISOString() : null;
+    res.json({ ...updater, output, finishedAt });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Node capabilities — lets the panel gate the WEB proxy option per node

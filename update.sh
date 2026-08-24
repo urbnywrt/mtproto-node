@@ -45,11 +45,50 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
+# Запущенный внутри контейнера сервис-ноды, скрипт убивает сам себя: `docker compose
+# down` удаляет тот самый контейнер, в котором он работает, процесс умирает вместе с
+# ним, и поднимать ноду обратно уже некому. Так кнопка «Обновить» в панели гарантированно
+# роняла ноду насмерть. Поэтому перезапускаем себя в контейнере-спутнике: он не входит в
+# compose-проект, `down` его не трогает, и он спокойно доводит обновление до конца.
+if [ -f /.dockerenv ] && [ "${MTPROTO_UPDATE_SIDECAR:-0}" != "1" ]; then
+    SELF_NAME="mtproto-service-node"
+    HOST_PROJECT=$(docker inspect "$SELF_NAME" --format '{{range .Mounts}}{{if eq .Destination "/app/project"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+    SELF_IMAGE=$(docker inspect "$SELF_NAME" --format '{{.Config.Image}}' 2>/dev/null || true)
+
+    if [ -z "$HOST_PROJECT" ] || [ -z "$SELF_IMAGE" ]; then
+        echo -e "${RED}Не удалось определить каталог проекта на хосте.${NC}"
+        echo -e "Обновление отменено, чтобы не оставить ноду выключенной."
+        exit 1
+    fi
+
+    mkdir -p data
+    docker rm -f mtproto-node-updater >/dev/null 2>&1 || true
+    docker run -d --name mtproto-node-updater \
+        --network mtproto-net \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "${HOST_PROJECT}":/app/project \
+        -w /app/project \
+        -e MTPROTO_UPDATE_SIDECAR=1 \
+        "$SELF_IMAGE" \
+        bash -c 'bash update.sh "$@" > /app/project/data/update.log 2>&1' _ "$@" >/dev/null
+
+    echo -e "${GREEN}Обновление запущено в отдельном контейнере mtproto-node-updater.${NC}"
+    echo -e "Нода перезапустится сама; журнал — data/update.log"
+    exit 0
+fi
+
 # Порт API берём из .env: compose публикует именно его, а проверка готовности
 # ниже раньше использовала дефолт 8443 и на ноде с другим PORT не проходила
 # никогда — обновление завершалось ошибкой при полностью исправной ноде.
 PORT=$(grep '^PORT=' .env | cut -d'=' -f2)
 PORT=${PORT:-8443}
+
+# В контейнере-спутнике localhost — он сам, а не хост, где опубликован порт ноды.
+if [ "${MTPROTO_UPDATE_SIDECAR:-0}" = "1" ]; then
+    API_URL="http://mtproto-service-node:8443"
+else
+    API_URL="http://localhost:${PORT}"
+fi
 
 echo -e "${CYAN}[1/5] Получение списка запущенных прокси...${NC}"
 
@@ -121,7 +160,7 @@ fi
 echo -e "  Ожидание запуска API сервис-ноды..."
 READY=0
 for _ in $(seq 1 30); do
-    if curl -fsS "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+    if curl -fsS "${API_URL}/api/health" >/dev/null 2>&1; then
         READY=1
         break
     fi
@@ -164,7 +203,7 @@ echo -e "${CYAN}[5/5] Восстановление прокси...${NC}"
 AUTH_TOKEN=$(grep '^AUTH_TOKEN=' .env | cut -d'=' -f2)
 
 # Получаем список прокси из API и запускаем остановленные
-PROXIES_RESPONSE=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "http://localhost:${PORT}/api/proxies" 2>/dev/null || echo "[]")
+PROXIES_RESPONSE=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_URL}/api/proxies" 2>/dev/null || echo "[]")
 
 if [ "$PROXIES_RESPONSE" != "[]" ] && [ -n "$PROXIES_RESPONSE" ]; then
     # Парсим ID прокси
@@ -176,7 +215,7 @@ if [ "$PROXIES_RESPONSE" != "[]" ] && [ -n "$PROXIES_RESPONSE" ]; then
         for PROXY_ID in $PROXY_IDS; do
             # Получаем статус прокси
             STATUS_RESPONSE=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
-                "http://localhost:${PORT}/api/proxies/${PROXY_ID}" 2>/dev/null || echo "{}")
+                "${API_URL}/api/proxies/${PROXY_ID}" 2>/dev/null || echo "{}")
 
             STATUS=$(echo "$STATUS_RESPONSE" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
 
@@ -189,7 +228,7 @@ if [ "$PROXIES_RESPONSE" != "[]" ] && [ -n "$PROXIES_RESPONSE" ]; then
                         -X POST \
                         -H "Authorization: Bearer ${AUTH_TOKEN}" \
                         -H "Content-Type: application/json" \
-                        "http://localhost:${PORT}/api/proxies/${PROXY_ID}/restart" 2>/dev/null || echo "000")
+                        "${API_URL}/api/proxies/${PROXY_ID}/restart" 2>/dev/null || echo "000")
                     if [ "$RESULT" = "200" ]; then
                         break
                     fi
