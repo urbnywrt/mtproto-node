@@ -245,6 +245,30 @@ export async function issueCertificate(
 }
 
 /**
+ * Issuance in flight, keyed by domain.
+ *
+ * Two orders for the same domain sabotage each other: each one clears stale TXT
+ * records before creating its own, so the later one deletes the challenge the earlier
+ * one is still being validated against. Observed in production when the operator
+ * pressed "reissue" again while the first attempt was still waiting.
+ */
+const inFlight = new Map<string, Promise<StoredCertificate>>();
+
+function issueOnce(domain: string, email: string, token: string): Promise<StoredCertificate> {
+  const running = inFlight.get(domain);
+  if (running) {
+    console.log(`ACME: выпуск для ${domain} уже идёт, жду его вместо нового запуска`);
+    return running;
+  }
+
+  const started = withOneRetry(() => issueCertificate(domain, email, token)).finally(() => {
+    inFlight.delete(domain);
+  });
+  inFlight.set(domain, started);
+  return started;
+}
+
+/**
  * Retry issuance once after a short pause.
  *
  * Observed on a freshly created domain: the first order came back with
@@ -289,7 +313,7 @@ export async function ensureCertificate(proxy: ProxyConfig): Promise<boolean> {
   try {
     const token = resolveToken(proxy);
     console.log(`ACME: выпуск сертификата для ${proxy.domain}...`);
-    const issued = await withOneRetry(() => issueCertificate(proxy.domain, proxy.acmeEmail!, token));
+    const issued = await issueOnce(proxy.domain, proxy.acmeEmail!, token);
     if (issued.staging) console.warn(`ACME: ${proxy.domain} использует staging-сертификат, клиенты ему не доверяют`);
     store.updateProxy(proxy.id, {
       certStatus: 'active',
