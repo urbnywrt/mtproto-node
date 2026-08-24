@@ -27,12 +27,12 @@ const proxies = [
   {
     id: 'ft2', name: 'faketls-port', note: '', port: 10002, secret: SECRET,
     domain: 'www.apple.com', containerName: 'c2', status: 'running', createdAt: 'x',
-    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'faketls', listenPort: 8443,
+    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'faketls', listenPort: 8443, natIp: '198.51.100.9',
   },
   {
     id: 'w1', name: 'web-plain', note: '', port: 10003, secret: SECRET,
     domain: 'proxy.example.com', containerName: 'c3', status: 'running', createdAt: 'x',
-    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'web', webSecretMode: 'plain',
+    trafficUp: 0, trafficDown: 0, connectedIps: [], type: 'web', webSecretMode: 'plain', webPublicIp: '203.0.113.10',
   },
   {
     id: 'w2', name: 'web-dd', note: '', port: 10004, secret: SECRET,
@@ -42,7 +42,33 @@ const proxies = [
 ];
 fs.writeFileSync(path.join(DATA_DIR, 'store.json'), JSON.stringify({ proxies }));
 
+// Container creation is stubbed out: these checks are about which generator a code path
+// picks, which is exactly what cannot be seen from the outside once a container is
+// running — a WEB proxy rebuilt as fake TLS looks alive and answers 502 to everything.
+const calls = [];
+function stub(rel, exports) {
+  const id = require.resolve(path.resolve(__dirname, rel));
+  require.cache[id] = { id, filename: id, loaded: true, exports };
+}
+stub('../dist/services/docker', {
+  removeProxyContainer: async () => {},
+  createProxyContainer: async (...args) => { calls.push({ kind: 'faketls', args }); return 'id'; },
+  createWebProxyContainer: async (opts) => { calls.push({ kind: 'web', opts }); return 'id'; },
+});
+stub('../dist/services/nginx', { updateNginxConfig: async () => {} });
+stub('../dist/services/acme', {
+  ensureCertificate: async () => {},
+  removeCertificate: () => {},
+  listCertifiedDomains: () => [],
+});
+stub('../dist/services/xray', {
+  removeXrayContainer: async () => {},
+  createXrayContainer: async () => {},
+  fetchAndParseSubscription: async () => ({}),
+});
+
 const { getProxyLink } = require(path.resolve(__dirname, '../dist/services/proxy'));
+const proxyService = require(path.resolve(__dirname, '../dist/services/proxy'));
 const { isValidWebDomain } = require(path.resolve(__dirname, '../dist/services/preflight'));
 
 let failures = 0;
@@ -77,11 +103,39 @@ const invalid = [
 for (const d of valid) check(`валиден: ${d}`, isValidWebDomain(d) === true);
 for (const d of invalid) check(`отвергнут: ${JSON.stringify(d)}`, isValidWebDomain(d) === false);
 
-fs.rmSync(DATA_DIR, { recursive: true, force: true });
+(async () => {
+  console.log('\nПересборка контейнера выбирает генератор по типу:');
 
-console.log('');
-if (failures > 0) {
-  console.error(`${failures} проверок провалено`);
-  process.exit(1);
-}
-console.log('Все проверки пройдены.');
+  calls.length = 0;
+  await proxyService.restartProxy('w1');
+  check('restart WEB-прокси идёт через WEB-генератор', calls.length === 1 && calls[0].kind === 'web',
+    JSON.stringify(calls.map((c) => c.kind)));
+  check('restart WEB сохраняет домен и публичный IP',
+    !!(calls[0] && calls[0].kind === 'web' && calls[0].opts.domain === 'proxy.example.com' && calls[0].opts.publicIp === '203.0.113.10'),
+    JSON.stringify(calls[0] && calls[0].opts));
+  check('restart WEB сохраняет seed сайта-прикрытия', !!(calls[0] && calls[0].opts && calls[0].opts.siteSeed === 'w1'));
+
+  calls.length = 0;
+  await proxyService.restartProxy('ft1');
+  check('restart fake TLS идёт через прежний генератор', calls.length === 1 && calls[0].kind === 'faketls',
+    JSON.stringify(calls.map((c) => c.kind)));
+
+  calls.length = 0;
+  await proxyService.restartProxy('ft2');
+  check('restart сохраняет NAT IP самого прокси', !!(calls[0] && calls[0].args && calls[0].args[7] === '198.51.100.9'),
+    JSON.stringify(calls[0] && calls[0].args[7]));
+
+  calls.length = 0;
+  await proxyService.updateProxy('w1', { natIp: '198.51.100.7' });
+  check('update WEB-прокси идёт через WEB-генератор', calls.length === 1 && calls[0].kind === 'web',
+    JSON.stringify(calls.map((c) => c.kind)));
+
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+
+  console.log('');
+  if (failures > 0) {
+    console.error(`${failures} проверок провалено`);
+    process.exit(1);
+  }
+  console.log('Все проверки пройдены.');
+})();

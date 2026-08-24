@@ -155,7 +155,7 @@ async function resolveContainerIp(containerName: string): Promise<string> {
   throw new Error(`Cannot resolve IP for container ${containerName}`);
 }
 
-interface TelemtProxyOptions {
+export interface TelemtProxyOptions {
   useMiddleProxy?: boolean;
   fastMode?: boolean;
   meInitRetryAttempts?: number;

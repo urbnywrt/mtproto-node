@@ -5,6 +5,7 @@ import { generateSecret, getRandomElement, getRandomPort, buildFullSecret } from
 import * as store from '../store';
 import * as acmeService from './acme';
 import * as dockerService from './docker';
+import type { TelemtProxyOptions } from './docker';
 import * as nginxService from './nginx';
 import * as preflightService from './preflight';
 import * as xrayService from './xray';
@@ -231,6 +232,71 @@ export async function getProxy(id: string): Promise<ProxyConfig | undefined> {
   return proxy;
 }
 
+interface RebuildOptions {
+  domain?: string;
+  tag?: string;
+  maskHost?: string;
+  socks5Host?: string;
+  natIp?: string;
+  carrier?: WebCarrier;
+  secretMode?: WebSecretMode;
+  options: TelemtProxyOptions;
+}
+
+/**
+ * Recreates a proxy's container with the generator its type requires, returning the
+ * public IP baked into a WEB container's config.
+ *
+ * Every path that rebuilds a container must go through here. Running a WEB proxy through
+ * createProxyContainer produces a fake TLS container instead: no [web] section, telemt
+ * listening on 443, a [censorship] block carrying the operator's own domain. nginx goes
+ * on proxying that vhost to the WEB port, so every request — decoy page and carrier
+ * alike — answers 502, while the client still completes TLS against nginx and reports
+ * the proxy as online. It then retries forever with no error to show.
+ */
+async function rebuildContainer(proxy: ProxyConfig, o: RebuildOptions): Promise<string | undefined> {
+  const domain = o.domain || proxy.domain;
+
+  if (proxy.type === 'web') {
+    const publicIp = config.webBindIp || config.publicIp || proxy.webPublicIp || '';
+    if (!publicIp) {
+      throw new Error(
+        'Не известен публичный IP для WEB-прокси. Задайте PUBLIC_IP на ноде ' +
+          'или пересоздайте прокси.'
+      );
+    }
+    await dockerService.createWebProxyContainer({
+      containerName: proxy.containerName,
+      // Same seed as at creation, so the decoy site keeps its fingerprint.
+      siteSeed: proxy.id,
+      secret: proxy.secret,
+      domain,
+      publicIp,
+      carrier: (o.carrier || proxy.webCarrier || 'https-lanes') as WebCarrier,
+      secretMode: (o.secretMode || proxy.webSecretMode || 'plain') as WebSecretMode,
+      // Mode 1 shares nginx's stream listener, so telemt cannot see real client IPs.
+      neutralizePerIpLimits: !config.webBindIp,
+      socks5Host: o.socks5Host,
+      natIp: o.natIp,
+      options: o.options,
+    });
+    return publicIp;
+  }
+
+  await dockerService.createProxyContainer(
+    proxy.containerName,
+    proxy.secret,
+    domain,
+    proxy.listenPort || config.nginxPort,
+    o.tag,
+    o.socks5Host,
+    o.maskHost,
+    o.natIp,
+    o.options
+  );
+  return undefined;
+}
+
 export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<ProxyConfig | undefined> {
   const proxy = store.getProxyById(id);
   if (!proxy) return undefined;
@@ -338,34 +404,18 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
     await dockerService.removeProxyContainer(proxy.containerName);
     const effectiveNatIp = updates.natIp !== undefined ? updates.natIp : (proxy.natIp || config.natIp || undefined);
 
-    if (proxy.type === 'web') {
-      // A WEB proxy must be rebuilt with its own config generator. Running it through
-      // createProxyContainer would silently turn it into a fake TLS proxy: no [web]
-      // section, a listener on 443 and a censorship block — it would look alive and
-      // serve nothing.
-      const publicIp = config.webBindIp || config.publicIp || proxy.webPublicIp || '';
-      if (!publicIp) {
-        throw new Error(
-          'Не известен публичный IP для WEB-прокси. Задайте PUBLIC_IP на ноде ' +
-            'или пересоздайте прокси.'
-        );
-      }
-      const domain = updates.domain || proxy.domain;
-      await dockerService.createWebProxyContainer({
-        containerName: proxy.containerName,
-        // Same seed as at creation, so the decoy site keeps its fingerprint.
-        siteSeed: proxy.id,
-        secret: proxy.secret,
-        domain,
-        publicIp,
-        carrier: (updates.webCarrier || proxy.webCarrier || 'https-lanes') as WebCarrier,
-        secretMode: (updates.webSecretMode || proxy.webSecretMode || 'plain') as WebSecretMode,
-        neutralizePerIpLimits: !config.webBindIp,
-        socks5Host: newSocks5Host,
-        natIp: effectiveNatIp,
-        options: Object.assign({}, proxy, req),
-      });
+    const publicIp = await rebuildContainer(proxy, {
+      domain: updates.domain || proxy.domain,
+      tag: updates.tag !== undefined ? updates.tag : proxy.tag,
+      maskHost: updates.maskHost !== undefined ? updates.maskHost : proxy.maskHost,
+      socks5Host: newSocks5Host,
+      natIp: effectiveNatIp,
+      carrier: (updates.webCarrier || proxy.webCarrier || 'https-lanes') as WebCarrier,
+      secretMode: (updates.webSecretMode || proxy.webSecretMode || 'plain') as WebSecretMode,
+      options: Object.assign({}, proxy, req),
+    });
 
+    if (proxy.type === 'web') {
       const updated = store.updateProxy(id, { ...updates, webPublicIp: publicIp });
       if (updated) {
         await acmeService.ensureCertificate(updated);
@@ -373,18 +423,6 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
       }
       return store.getProxyById(id);
     }
-
-    await dockerService.createProxyContainer(
-      proxy.containerName,
-      proxy.secret,
-      updates.domain || proxy.domain,
-      proxy.listenPort || config.nginxPort,
-      updates.tag !== undefined ? updates.tag : proxy.tag,
-      newSocks5Host,
-      updates.maskHost !== undefined ? updates.maskHost : proxy.maskHost,
-      effectiveNatIp,
-      Object.assign({}, proxy, req)
-    );
   }
 
   const updated = store.updateProxy(id, updates);
@@ -399,20 +437,22 @@ export async function restartProxy(id: string): Promise<ProxyConfig | undefined>
   // Удаляем старый контейнер если существует
   await dockerService.removeProxyContainer(proxy.containerName).catch(() => {});
 
-  // Создаём контейнер заново (с VPN если настроен)
-  await dockerService.createProxyContainer(
-    proxy.containerName,
-    proxy.secret,
-    proxy.domain,
-    proxy.listenPort || config.nginxPort,
-    proxy.tag,
-    proxy.vpnContainerName,
-    proxy.maskHost,
-    config.natIp || undefined,
-    proxy
-  );
+  // Создаём контейнер заново (с VPN если настроен), генератором своего типа.
+  const publicIp = await rebuildContainer(proxy, {
+    tag: proxy.tag,
+    maskHost: proxy.maskHost,
+    socks5Host: proxy.vpnContainerName,
+    // A per-proxy NAT IP has to survive a restart: falling back to the node-wide value
+    // here would quietly rebuild the proxy with different upstream routing than the one
+    // it was created and updated with.
+    natIp: proxy.natIp || config.natIp || undefined,
+    options: proxy,
+  });
 
-  const updated = store.updateProxy(id, { status: 'running' });
+  const updated = store.updateProxy(
+    id,
+    publicIp ? { status: 'running', webPublicIp: publicIp } : { status: 'running' }
+  );
   await nginxService.updateNginxConfig(store.getAllProxies());
   return updated;
 }
