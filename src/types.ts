@@ -28,7 +28,12 @@ export interface WebProxyFields {
   webSecretMode?: WebSecretMode;
 }
 
-export interface ProxyConfig extends WebProxyFields {
+/** Resolved at creation and reused on update: telemt bakes it into public_addr. */
+export interface WebRuntimeFields {
+  webPublicIp?: string;
+}
+
+export interface ProxyConfig extends WebProxyFields, WebRuntimeFields {
   id: string;
   name: string;
   note: string;

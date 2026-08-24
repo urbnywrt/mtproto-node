@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { config, FAKE_TLS_DOMAINS } from '../config';
-import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyType, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry } from '../types';
+import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyType, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry, WebCarrier, WebSecretMode } from '../types';
 import { generateSecret, getRandomElement, getRandomPort, buildFullSecret } from '../utils/crypto';
 import * as store from '../store';
 import * as acmeService from './acme';
@@ -76,6 +76,7 @@ async function createWebProxy(req: ProxyCreateRequest): Promise<ProxyConfig> {
     webCarrier: req.webCarrier || 'https-lanes',
     webSecretMode: req.webSecretMode || 'plain',
     certStatus: 'pending',
+    webPublicIp: targetIp,
     natIp,
     tunnelInterface: req.tunnelInterface || config.tunnelInterface || undefined,
   };
@@ -336,6 +337,43 @@ export async function updateProxy(id: string, req: ProxyUpdateRequest): Promise<
   if (needsRestart) {
     await dockerService.removeProxyContainer(proxy.containerName);
     const effectiveNatIp = updates.natIp !== undefined ? updates.natIp : (proxy.natIp || config.natIp || undefined);
+
+    if (proxy.type === 'web') {
+      // A WEB proxy must be rebuilt with its own config generator. Running it through
+      // createProxyContainer would silently turn it into a fake TLS proxy: no [web]
+      // section, a listener on 443 and a censorship block — it would look alive and
+      // serve nothing.
+      const publicIp = config.webBindIp || config.publicIp || proxy.webPublicIp || '';
+      if (!publicIp) {
+        throw new Error(
+          'Не известен публичный IP для WEB-прокси. Задайте PUBLIC_IP на ноде ' +
+            'или пересоздайте прокси.'
+        );
+      }
+      const domain = updates.domain || proxy.domain;
+      await dockerService.createWebProxyContainer({
+        containerName: proxy.containerName,
+        // Same seed as at creation, so the decoy site keeps its fingerprint.
+        siteSeed: proxy.id,
+        secret: proxy.secret,
+        domain,
+        publicIp,
+        carrier: (updates.webCarrier || proxy.webCarrier || 'https-lanes') as WebCarrier,
+        secretMode: (updates.webSecretMode || proxy.webSecretMode || 'plain') as WebSecretMode,
+        neutralizePerIpLimits: !config.webBindIp,
+        socks5Host: newSocks5Host,
+        natIp: effectiveNatIp,
+        options: Object.assign({}, proxy, req),
+      });
+
+      const updated = store.updateProxy(id, { ...updates, webPublicIp: publicIp });
+      if (updated) {
+        await acmeService.ensureCertificate(updated);
+        await nginxService.updateNginxConfig(store.getAllProxies());
+      }
+      return store.getProxyById(id);
+    }
+
     await dockerService.createProxyContainer(
       proxy.containerName,
       proxy.secret,
