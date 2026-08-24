@@ -45,6 +45,11 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
+# Каталог проекта монтируется по тому же пути, что и на хосте. Демон трактует
+# относительные пути в docker-compose.yml как хостовые, поэтому из спутника,
+# смонтированного куда-то ещё, `./data` и `.` указали бы в несуществующие каталоги —
+# Docker молча создал бы пустые, и нода поднялась бы с пустым стором и без прокси.
+#
 # Запущенный внутри контейнера сервис-ноды, скрипт убивает сам себя: `docker compose
 # down` удаляет тот самый контейнер, в котором он работает, процесс умирает вместе с
 # ним, и поднимать ноду обратно уже некому. Так кнопка «Обновить» в панели гарантированно
@@ -66,11 +71,12 @@ if [ -f /.dockerenv ] && [ "${MTPROTO_UPDATE_SIDECAR:-0}" != "1" ]; then
     docker run -d --name mtproto-node-updater \
         --network mtproto-net \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "${HOST_PROJECT}":/app/project \
-        -w /app/project \
+        -v "${HOST_PROJECT}":"${HOST_PROJECT}" \
+        -w "${HOST_PROJECT}" \
         -e MTPROTO_UPDATE_SIDECAR=1 \
+        -e HOST_PROJECT="${HOST_PROJECT}" \
         "$SELF_IMAGE" \
-        bash -c 'bash update.sh "$@" > /app/project/data/update.log 2>&1' _ "$@" >/dev/null
+        bash -c 'bash update.sh "$@" > "${HOST_PROJECT}/data/update.log" 2>&1' _ "$@" >/dev/null
 
     echo -e "${GREEN}Обновление запущено в отдельном контейнере mtproto-node-updater.${NC}"
     echo -e "Нода перезапустится сама; журнал — data/update.log"
