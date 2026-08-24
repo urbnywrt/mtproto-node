@@ -498,11 +498,14 @@ type = "socks5"
 address = "${opts.socks5Host}:${opts.socks5Port}"
 `;
   } else if (!opts.natIp && opts.socks5Host && opts.socks5Port) {
+    // Everything through the tunnel, including middle-proxy and the proxy-secret
+    // download. Sending those direct — as the fake TLS generator does — assumes the
+    // node can reach Telegram itself. Where it cannot, telemt loops on
+    // "Connection timeout to 149.154.x" and "proxy-secret is unavailable", the carrier
+    // still comes up, and the client shows the proxy as online while nothing sends.
+    // Without natIp there is no host routing to make a direct path work, so there is
+    // nothing to gain by keeping one.
     toml += `
-[[upstreams]]
-type = "direct"
-scopes = "me, fetch"
-
 [[upstreams]]
 type = "socks5"
 address = "${opts.socks5Host}:${opts.socks5Port}"
