@@ -1,62 +1,83 @@
-# Обновление до версии с поддержкой WEB-прокси
+# Переход на форк с поддержкой WEB-прокси
 
-Пошаговая инструкция для парка нод и панели. Проверена на стенде
-(Ubuntu 26.04, telemt 3.5.2, nginx 1.31.4, боевой Let's Encrypt).
+Форк `urbnywrt/mtproto-node` (и парный `urbnywrt/mtproto-panel`) — это проект
+[danielVNru](https://github.com/danielVNru/mtproto-node) плюс Telegram WEB proxy.
+Всё влито в `master` форка, отдельных веток для раскатки не нужно.
 
-Обновление **не требует** менять `.env` и **не трогает** существующие
-fake TLS прокси: их ссылки, порты и домены остаются прежними.
+**Новые серверы** ставятся командой из [README.md](README.md#быстрая-установка) —
+установщик сразу берёт форк, и эта инструкция им не нужна.
+
+Здесь — как перевести на форк серверы, поставленные из репозитория автора
+(или из ветки `feature/web-proxy`). Проверено на стенде (Ubuntu 26.04, telemt 3.5.2,
+nginx 1.31.4, боевой Let's Encrypt) и на боевых нодах.
+
+Переход ноды **не требует** менять `.env` и **не трогает** существующие fake TLS прокси:
+их ссылки, порты и домены остаются прежними. У панели может понадобиться поправить
+порт в `.env` — см. раздел 3.
 
 ---
 
 ## 0. Перед началом
 
-### 0.1 Запушить ветку в форк
+Всё в этом разделе — на каждом сервере, один раз. Для панели то же самое
+в `/opt/mtproto-panel` с `mtproto-panel` в адресе.
 
-`update.sh` делает `git fetch origin <ветка>`, поэтому ветка должна быть на GitHub:
-
-```bash
-git push -u origin feature/web-proxy
-```
-
-Форк `urbnywrt/mtproto-node` на момент написания идентичен апстриму
-`danielVNru/mtproto-node` (0 коммитов вперёд, 0 назад), и ветка основана ровно
-на том, что развёрнуто на боевых нодах. Обновление ничего не откатит назад.
-
-### 0.2 Перенаправить origin на форк — обязательно
-
-`install.sh` зашивал адрес репозитория автора, поэтому на боевых серверах
-`origin` смотрит на `danielVNru/*`. Ветки `feature/web-proxy` там нет и быть
-не может, так что `update.sh --b=...` упадёт на `git fetch`.
-
-На каждом сервере, один раз:
+### 0.1 Посмотреть, что стоит сейчас
 
 ```bash
 cd /opt/mtproto-node
-git remote -v                      # убедиться, что сейчас там danielVNru
+git remote -v            # danielVNru — значит, нужен шаг 0.2
+git branch --show-current
+git status --short       # должно быть пусто, см. шаг 0.4
+grep '^IMAGE_' .env      # см. шаг 0.3
+```
+
+### 0.2 Перенаправить origin на форк — обязательно
+
+`update.sh` и кнопка «Обновить» тянут код из `origin`. Старый `install.sh`
+зашивал адрес репозитория автора, и без этой правки сервер так и будет
+обновляться с кода автора — WEB-прокси на нём не появится.
+
+```bash
 git remote set-url origin https://github.com/urbnywrt/mtproto-node.git
 git fetch origin
 ```
 
-Для панели — то же самое с `mtproto-panel`.
-
-После этого все последующие обновления берутся из форка. Чтобы подтянуть
-изменения автора, добавьте апстрим отдельным remote и вливайте в форк:
+Чтобы видеть изменения автора, добавьте его отдельным remote — вливать их в форк
+нужно на GitHub, серверы по-прежнему смотрят только в `origin`:
 
 ```bash
 git remote add upstream https://github.com/danielVNru/mtproto-node.git
 ```
 
-Для **новых** нод `REPO_URL` теперь переопределяется, и переставлять origin
-руками не придётся:
+Если сервер стоял на ветке `feature/web-proxy`, переключите его на `master` —
+код в них одинаковый, ветку потом можно удалить:
 
 ```bash
-REPO_URL=https://github.com/urbnywrt/mtproto-node.git bash install.sh
+git checkout -B master origin/master
 ```
 
-### 0.3 Резервная копия
+### 0.3 Образы — ничего настраивать не нужно
 
-`update.sh` делает `git reset --hard`, то есть любые правки файлов прямо
-на сервере будут потеряны. Стор при этом не трогается, но скопировать стоит:
+`docker-compose.yml` форка по умолчанию берёт образы из `ghcr.io/urbnywrt`.
+Уберите из `.env` только то, что уводит в другое место:
+
+- `IMAGE_REPO=ghcr.io/danielvnru` — иначе приедет образ автора без WEB;
+- `IMAGE_TAG=feature-web-proxy` — иначе нода застрянет на сборке старой ветки.
+
+`IMAGE_REPO=ghcr.io/urbnywrt`, если уже прописан, не мешает.
+
+### 0.4 Локальные правки
+
+`update.sh` делает `git stash`, переключает код и возвращает правки поверх.
+Если они пересекаются с изменениями форка, в файле окажутся маркеры конфликта,
+и контейнер не поднимется. Поэтому до обновления `git status --short` должен
+быть пустым: порты и имена образов — в `.env`, остальное — в
+`docker-compose.override.yml`. Подробнее — в [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+### 0.5 Резервная копия
+
+Стор при обновлении не трогается, но скопировать стоит:
 
 ```bash
 cp /opt/mtproto-node/data/store.json /opt/mtproto-node/data/store.json.bak
@@ -82,8 +103,11 @@ cp /opt/mtproto-node/data/store.json /opt/mtproto-node/data/store.json.bak
 
 ```bash
 cd /opt/mtproto-node
-bash update.sh --b=feature/web-proxy
+bash update.sh
 ```
+
+Первый раз — только по SSH. Кнопка «Обновить» в панели на ноде со скриптом автора
+роняет ноду насмерть (см. раздел 8); после перехода на форк ею можно пользоваться.
 
 ### Что произойдёт само
 
@@ -101,9 +125,11 @@ bash update.sh --b=feature/web-proxy
 ```bash
 docker logs mtproto-service-node 2>&1 | grep -i "миграция\|telemt\|nginx"
 docker ps --format '{{.Names}}\t{{.Status}}'
+docker inspect mtproto-service-node --format '{{.Config.Image}}'   # ghcr.io/urbnywrt/...
 
 TOKEN=$(grep ^AUTH_TOKEN= .env | cut -d= -f2)
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8443/api/capabilities
+PORT=$(grep ^PORT= .env | cut -d= -f2)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:${PORT:-8443}/api/capabilities
 ```
 
 Убедитесь, что существующие прокси отвечают — подключитесь клиентом по любой
@@ -115,11 +141,37 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8443/api/capabilities
 
 ```bash
 cd /opt/mtproto-panel
-bash update.sh --b=feature/web-proxy
+bash update.sh
 ```
 
 Миграции БД нет: таблицы прокси в Postgres не существует, схема не меняется.
 Откат безопасен по построению.
+
+Кнопкой «Обновить» в настройках панели не пользуйтесь — только SSH: панель пока
+обновляет себя изнутри своего же контейнера и на `docker compose down` выключается.
+
+### Порты панели
+
+У автора образ фронтенда требовал сертификаты, а compose публиковал хостовый 80 дважды,
+поэтому вариант установки «Без SSL» не поднимался, и на серверах правили
+`frontend/nginx.conf` и порты руками. В форке это исправлено: образ отдаёт HTTP на 80,
+в `docker-compose.yml` один порт — `${PORT:-80}:80`, HTTPS целиком в
+`docker-compose.override.yml` от установщика. Переменной `HTTP_PORT` больше нет.
+
+До обновления панели:
+
+```bash
+cd /opt/mtproto-panel
+git status --short                 # правки nginx.conf и compose — откатить
+git checkout -- frontend/nginx.conf docker-compose.yml
+grep -E '^(PORT|HTTP_PORT)=' .env
+ls docker-compose.override.yml 2>/dev/null
+```
+
+- **Без SSL**: `PORT` — порт, на котором панель должна открываться. `HTTP_PORT`
+  удалите.
+- **С SSL** (есть override): `PORT=18080` оставьте, порт HTTPS задан в override.
+  Хостовый 80 панель больше не занимает.
 
 ---
 
@@ -133,12 +185,12 @@ bash update.sh --b=feature/web-proxy
 
 ```bash
 echo 'CF_API_TOKEN=<токен>' >> /opt/mtproto-node/.env
-docker compose up -d
+cd /opt/mtproto-node && docker compose up -d
 ```
 
 Домен WEB-прокси: собственный FQDN, A-запись на нужный IP ноды и обязательно
 **DNS only (серое облако)**. Оранжевое облако терминирует TLS у Cloudflare и
-полностью ломает WEB-каррier; нода откажется создавать такой прокси.
+полностью ломает WEB-carrier; нода откажется создавать такой прокси.
 
 ### Вариант А. 443 держит наш nginx (`NGINX_PORT=443`) — обычный случай
 
@@ -155,7 +207,7 @@ nginx делит порт по SNI, то есть по домену: fake TLS д
 
 ```bash
 echo 'WEB_BIND_IP=<второй IP>' >> /opt/mtproto-node/.env
-docker compose up -d
+cd /opt/mtproto-node && docker compose up -d
 ```
 
 `capabilities` покажет `mode: 2`. WEB сядет на `<второй IP>:443` и не будет
@@ -190,73 +242,66 @@ remnawave или что-то ещё, чему этот порт обязател
 
 ---
 
-## 5. Готовые образы вместо сборки на ноде
+## 5. Откуда берутся образы
 
-Механизм уже был в проекте, не хватало только настройки на форк.
+Образы собирает GitHub Actions форка (`.github/workflows/build.yml`) и публикует
+в `ghcr.io/urbnywrt`. Пакеты `mtproto-node`, `mtproto-panel-backend` и
+`mtproto-panel-frontend` публичные — `docker login` на серверах не нужен.
 
-`.github/workflows/build.yml` берёт владельца из `github.repository_owner`,
-поэтому на форке он публикует в `ghcr.io/urbnywrt/*` без единой правки.
-`update.sh` тоже уже устроен правильно:
+`install.sh` и `update.sh` сначала тянут готовый образ и собирают локально,
+только если его нет. Собрать принудительно: `bash update.sh --build` или
+`docker compose up -d --build`.
 
-```bash
-if docker compose pull 2>/dev/null; then ... else docker compose build; fi
-```
+### Теги ноды
 
-Сначала пытается стянуть готовый образ, собирает только если не вышло.
+Сборка идёт на push в master, dev и `feature/**`, а также по ручному запуску
+(**Actions → Build & Push Docker Image → Run workflow**).
 
-### 5.1 Собрать и опубликовать
+| Откуда собрано | Теги |
+|---|---|
+| master, dev | `:latest`, `:master` / `:dev`, `:<sha>` |
+| `feature/<имя>` | `:feature-<имя>`, `:<sha>` — **без** `:latest` |
 
-Воркфлоу срабатывает на push в `master` и `dev`, либо вручную через
-**Actions → Build & Push Docker Image → Run workflow** с выбором ветки
-(`workflow_dispatch` включён в обеих репах).
-
-Публикуются два тега: `:latest` и `:<sha коммита>`.
-
-### 5.2 Сделать пакеты публичными — иначе ноды будут молча собирать сами
-
-**Первый push создаёт пакет приватным.** Нода без авторизации получит отказ на
-`docker compose pull`, скрипт свалится в ветку `docker compose build` и
-соберёт образ локально — то есть внешне всё «работает», просто медленно и
-не тем образом, которым вы думаете.
-
-GitHub → **Packages** → пакет → *Package settings* → **Change visibility → Public**.
-Один раз на каждый пакет: `mtproto-node`, `mtproto-panel-backend`,
-`mtproto-panel-frontend`.
-
-Если оставляете приватными — на каждой ноде нужен вход в реестр:
+`:latest` двигают только master и dev: раньше ручной запуск с любой ветки публиковал
+сборку как `:latest`, и нода на master, нажав «Обновить», молча подтягивала код чужой
+ветки. При обновлении с ветки `update.sh` сам подставляет её тег, если `IMAGE_TAG`
+не задан в `.env`:
 
 ```bash
-echo <PAT-с-read:packages> | docker login ghcr.io -u <логин> --password-stdin
+bash update.sh --b=feature/foo
 ```
 
-### 5.3 Указать нодам свой реестр
+Флаг `--pull` берёт то, что настроено в `IMAGE_TAG` (по умолчанию `:latest`), даже
+при обновлении с ветки.
 
-`docker-compose.yml` больше не зашивает имя образа. В `.env` каждого сервера:
+### Теги панели
 
-```bash
-echo 'IMAGE_REPO=ghcr.io/urbnywrt' >> /opt/mtproto-node/.env
-```
+Воркфлоу панели срабатывает только на push в master и dev (и вручную) и публикует
+`:latest` и `:<sha>`, без тегов веток. Ручной запуск с другой ветки перезапишет
+`:latest` — делайте его только с master.
 
-Дефолт остался прежним (`ghcr.io/danielvnru`), так что у тех, кто не трогал
-`.env`, ничего не меняется.
+### Переопределение в `.env`
 
-Можно закрепиться на конкретной сборке вместо плавающего `latest`:
+| Переменная | По умолчанию | Зачем |
+|---|---|---|
+| `IMAGE_REPO` | `ghcr.io/urbnywrt` | взять образы из другого реестра |
+| `IMAGE_TAG` | `latest` | закрепиться на сборке: `IMAGE_TAG=<sha>` на одну ноду, проверили — остальные |
 
-```bash
-IMAGE_TAG=<sha коммита>
-```
+### Что учесть
 
-Это удобно для поэтапной раскатки: одна нода на новый тег, проверили, потом остальные.
-
-### 5.4 Что учесть
-
-- Воркфлоу собирает только под **linux/amd64** — платформы в нём не заданы.
-  Для arm64-ноды нужно добавить `platforms: linux/amd64,linux/arm64` в
-  `build-push-action` (сборка станет заметно дольше).
+- Воркфлоу собирает только под **linux/amd64**. На arm64-сервере `pull` не найдёт
+  подходящий образ, и скрипт соберёт его локально. Чтобы этого не было, добавьте
+  `platforms: linux/amd64,linux/arm64` в `build-push-action` (сборка станет дольше).
 - Образ telemt это **не затрагивает**: его собирает сама нода в рантайме под
   свою архитектуру, и к GHCR он отношения не имеет.
-- Секция `build:` в compose остаётся — это запасной путь, если реестр
-  недоступен. Принудительно собрать локально: `docker compose up -d --build`.
+
+Проверить, что на ноде запущен код форка:
+
+```bash
+docker exec mtproto-service-node sh -c 'grep -c rebuildContainer dist/services/proxy.js'
+```
+
+Ненулевой результат — код форка.
 
 ---
 
@@ -272,17 +317,22 @@ IMAGE_TAG=<sha коммита>
 | `TELEMT_VERSION` | обкатать новый релиз telemt на одной ноде |
 | `ACME_STAGING` | `1` — staging Let's Encrypt, для отладки без лимитов |
 | `CERT_RENEW_DAYS` | порог продления, по умолчанию 30 |
+| `IMAGE_REPO`, `IMAGE_TAG` | см. раздел 5 |
 
 Смена `ACME_STAGING` перевыпускает сертификат автоматически.
 
 ---
 
-## 7. Откат
+## 7. Откат на версию автора
 
 ```bash
 cd /opt/mtproto-node
-bash update.sh --b=master
+git remote set-url origin https://github.com/danielVNru/mtproto-node.git
+bash update.sh
 ```
+
+`docker-compose.yml` автора зашивает образ `ghcr.io/danielvnru/mtproto-node:latest`,
+так что `IMAGE_REPO` и `IMAGE_TAG` из `.env` после отката ни на что не влияют.
 
 - Новые поля в `store.json` старым кодом игнорируются, записи читаются как раньше.
 - Сертификаты остаются на диске и никому не мешают.
@@ -290,39 +340,10 @@ bash update.sh --b=master
   из `.env` до отката, иначе nginx останется на втором IP.
 - Образ telemt останется собранным под 3.5.2; чтобы вернуть прежнюю версию,
   пересоздайте контейнеры после отката.
+- WEB-прокси после отката работать перестанут: код автора их не знает.
+- Кнопкой «Обновить» на откатанной ноде не пользуйтесь — только SSH (см. раздел 8).
 
 ---
-
-## 7a. Откуда берётся образ при обновлении
-
-GitHub Actions собирает образ при пуше в master, dev и `feature/**`, а также по ручному
-запуску. Теги зависят от ветки:
-
-| Откуда собрано | Теги |
-|---|---|
-| master, dev | `:latest`, `:master` / `:dev`, `:<sha>` |
-| `feature/<имя>` | `:feature-<имя>`, `:<sha>` — **без** `:latest` |
-
-`:latest` двигают только master и dev. Раньше ручной запуск с любой ветки публиковал
-сборку как `:latest`, и нода на master, нажав «Обновить», подтягивала код чужой ветки —
-молча и без ошибок.
-
-При обновлении с ветки `update.sh` сам подставляет её тег, если `IMAGE_TAG` не задан
-в `.env`:
-
-```bash
-bash update.sh --b=feature/web-proxy
-```
-
-Собирает локально, только если готового образа с таким тегом ещё нет. Флаги: `--build` —
-собирать всегда, `--pull` — взять то, что настроено в `IMAGE_TAG` (по умолчанию
-`:latest`), даже при обновлении с ветки.
-
-Проверить, что запущено именно то, что нужно:
-
-```bash
-docker exec mtproto-service-node sh -c 'grep -c rebuildContainer dist/services/proxy.js'
-```
 
 ## 8. Что вскрылось при раскатке на прод
 
@@ -367,7 +388,7 @@ docker exec mtproto-service-node sh -c 'grep -c rebuildContainer dist/services/p
 **Кнопка «Обновить» в панели роняла ноду насмерть.** Скрипт работал внутри контейнера
 сервис-ноды и на `docker compose down` удалял сам себя — нода оставалась выключенной до
 ручного запуска. Теперь обновление уходит в контейнер-спутник. На ноде со старой копией
-скрипта кнопкой пользоваться нельзя: обновляйтесь по SSH, пока не приедет исправление.
+скрипта кнопкой пользоваться нельзя: первое обновление — по SSH.
 
 **IP xray-контейнера запекается в конфиг.** После перетасовки адресов Docker
 конфиг указывает в пустоту, и откат кода это не лечит. См. TROUBLESHOOTING.md.
@@ -376,7 +397,9 @@ docker exec mtproto-service-node sh -c 'grep -c rebuildContainer dist/services/p
 
 ## 9. Чеклист приёмки ноды
 
+- [ ] `git remote -v` смотрит на `urbnywrt/mtproto-node`
 - [ ] `docker ps` — все контейнеры в статусе Up
+- [ ] образ сервис-ноды — `ghcr.io/urbnywrt/mtproto-node`
 - [ ] в логе есть строка про миграцию `containerPort`
 - [ ] существующие fake TLS прокси подключаются по старым ссылкам
 - [ ] `GET /api/capabilities` отдаёт ожидаемый `mode`

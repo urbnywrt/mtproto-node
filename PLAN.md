@@ -1,6 +1,6 @@
 # WEB proxy support — план реализации (mtproto-node)
 
-Ветка: `feature/web-proxy`. Парная ветка в `mtproto-panel` — см. `mtproto-panel/PLAN.md`.
+Ветка: `feature/web-proxy`, влита в `master` форка. Парная ветка в `mtproto-panel` — см. `mtproto-panel/PLAN.md`.
 
 Цель: добавить второй тип прокси `web` (Telegram WEB proxy, telemt ≥ 3.5.2) рядом
 с существующим `faketls`, не меняя поведение существующих прокси и **не трогая
@@ -144,7 +144,7 @@ HTTP-01 не используем: `:80` может быть занят, а DNS-
 - Автопродление при остатке < 30 дней.
 
 **Критично:** A-запись web-домена обязана быть **DNS-only (серое облако)**. Оранжевое облако
-терминирует TLS у Cloudflare, и WEB-каррier ломается полностью. Preflight это проверяет
+терминирует TLS у Cloudflare, и WEB-carrier ломается полностью. Preflight это проверяет
 (см. этап 5) — резолв в диапазоны Cloudflare трактуем как проксированную запись и отказываем.
 
 ---

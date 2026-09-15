@@ -11,7 +11,7 @@
 **Идите по цепочке от клиента к Telegram и найдите первое место, где рвётся.**
 
 ```
-клиент → nginx (SNI/TLS) → telemt (каррier) → upstream (туннель) → Telegram
+клиент → nginx (SNI/TLS) → telemt (carrier) → upstream (туннель) → Telegram
 ```
 
 Каждое звено проверяется отдельной командой ниже. Не пропускайте шаги: три
@@ -185,7 +185,7 @@ docker logs mtproto-service-node 2>&1 | grep -iE 'acme|сертификат' | t
 
 - `резолвится в X, а нужен Y` — A-запись смотрит не туда
 - `проксируется через Cloudflare` — **оранжевое облако**, переключить в DNS only;
-  оно терминирует TLS у себя и ломает каррier полностью
+  оно терминирует TLS у себя и ломает carrier полностью
 - `не резолвится в A-запись` — записи нет либо с ноды не работает разрешение имён
 
 Домен нода **не создаёт сама** — A-запись заводите руками. Токен используется
@@ -239,6 +239,27 @@ docker ps --format '{{.Names}}\t{{.Status}}'
 
 ---
 
+## Обновился, а WEB-прокси в панели так и нет
+
+**Симптом.** `update.sh` отработал без ошибок, но `GET /api/capabilities` отдаёт 404,
+а панель пишет «Нода не обновлена до версии с поддержкой WEB».
+
+**Причина.** Сервер обновился с кода автора: `origin` смотрит на `danielVNru/*`
+(так ставил старый `install.sh`), либо `.env` уводит на чужой образ.
+
+```bash
+cd /opt/mtproto-node
+git remote -v
+grep '^IMAGE_' .env
+docker inspect mtproto-service-node --format '{{.Config.Image}}'
+```
+
+**Лечение.** `git remote set-url origin https://github.com/urbnywrt/mtproto-node.git`,
+убрать из `.env` `IMAGE_REPO=ghcr.io/danielvnru` и устаревший `IMAGE_TAG`, затем
+`bash update.sh`. Подробно — [UPGRADE.md](UPGRADE.md), раздел 0.
+
+---
+
 ## Обновление конфликтует в `docker-compose.yml`
 
 `update.sh` делает `git stash`, применяет ветку и возвращает изменения поверх.
@@ -253,7 +274,7 @@ git status --short
 
 Непусто — сначала перенесите правки:
 
-- порты и имена образов → в `.env` (`HTTP_PORT`, `PORT`, `IMAGE_REPO`, `IMAGE_TAG`)
+- порты и имена образов → в `.env` (`PORT`, `NGINX_PORT`, `IMAGE_REPO`, `IMAGE_TAG`)
 - свой `nginx.conf` → в неотслеживаемый файл плюс `docker-compose.override.yml`
   с монтированием
 
@@ -262,7 +283,7 @@ git status --short
 Если уже конфликтует:
 
 ```bash
-git checkout <коммит-ветки> -- docker-compose.yml
+git checkout origin/master -- docker-compose.yml
 grep -c '<<<<<<<' docker-compose.yml    # должно быть 0
 docker compose up -d
 ```

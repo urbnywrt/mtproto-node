@@ -1,6 +1,10 @@
 # MTProto Service Node
 
-Сервис-нода для управления MTProto прокси контейнерами. Устанавливается на каждый прокси-сервер и управляется через [MTProto Panel](https://github.com/danielVNru/mtproto-panel).
+Сервис-нода для управления MTProto прокси контейнерами. Устанавливается на каждый прокси-сервер и управляется через [MTProto Panel](https://github.com/urbnywrt/mtproto-panel).
+
+> Это форк [danielVNru/mtproto-node](https://github.com/danielVNru/mtproto-node) с поддержкой **Telegram WEB proxy**.
+> Установщик, `update.sh` и готовые образы (`ghcr.io/urbnywrt/mtproto-node`) по умолчанию берутся из этого форка.
+> Нода, поставленная из репозитория автора, переводится на форк по [UPGRADE.md](UPGRADE.md).
 
 ## Совместимость
 
@@ -129,18 +133,20 @@ curl -X POST http://NODE_IP:8443/api/proxies \
 Одна команда для загрузки и запуска:
 
 ```bash
-wget -qO /tmp/node-install.sh https://raw.githubusercontent.com/danielVNru/mtproto-node/master/install.sh && sudo bash /tmp/node-install.sh
+wget -qO /tmp/node-install.sh https://raw.githubusercontent.com/urbnywrt/mtproto-node/master/install.sh && sudo bash /tmp/node-install.sh
 ```
 
 Скрипт автоматически:
 1. Установит Docker и Docker Compose (если отсутствуют)
-2. Скачает последнюю версию из ветки `master`
+2. Склонирует ветку `master` форка `urbnywrt/mtproto-node` — `origin` будет смотреть на него же
 3. Запросит настройки:
    - **Порт API** (по умолчанию `8443`)
+   - **Порт прокси** — порт nginx (по умолчанию `443`)
 4. Сгенерирует **токен авторизации** (32 символа)
-5. Соберёт и запустит контейнер
+5. Скачает готовый образ `ghcr.io/urbnywrt/mtproto-node:latest` (соберёт локально, если реестр недоступен) и запустит контейнер
 
-Сервис-нода установится в `/opt/mtproto-node`.
+Сервис-нода установится в `/opt/mtproto-node`. WEB-прокси установщик не настраивает —
+нужные переменные дописываются в `.env` потом, см. [WEB-прокси](#web-прокси).
 
 > ⚠️ **Сохраните токен!** Он понадобится для подключения ноды в панели управления.
 
@@ -162,15 +168,16 @@ wget -qO /tmp/node-install.sh https://raw.githubusercontent.com/danielVNru/mtpro
 cd /opt/mtproto-node && bash update.sh
 ```
 
-Скрипт останавливает ноду, обновляет код, поднимает контейнер и восстанавливает
-запущенные прокси. Образ он берёт из GHCR, а собирает локально, только если готового нет.
+Скрипт останавливает ноду, обновляет код из `master` форка, поднимает контейнер и
+восстанавливает запущенные прокси. Образ он берёт из GHCR, а собирает локально, только
+если готового нет.
 
-Каждая ветка публикуется в GHCR под своим тегом (`feature/web-proxy` → `:feature-web-proxy`),
+Каждая ветка публикуется в GHCR под своим тегом (`feature/foo` → `:feature-foo`),
 а `:latest` двигают только master и dev. При обновлении с ветки скрипт сам подставляет
 её тег:
 
 ```bash
-bash update.sh --b=feature/web-proxy
+bash update.sh --b=feature/foo
 ```
 
 Тянуть `:latest` для ветки нельзя: там код другой ветки, и он приедет на ноду молча.
@@ -200,6 +207,8 @@ bash update.sh --b=feature/web-proxy
 | `PORT` | Внешний порт API сервис-ноды |
 | `AUTH_TOKEN` | Токен авторизации для подключения из панели |
 | `NGINX_PORT` | Порт nginx для прокси-трафика (по умолчанию `443`) |
+| `IMAGE_REPO` | Реестр образа ноды (по умолчанию `ghcr.io/urbnywrt`) |
+| `IMAGE_TAG` | Тег образа (по умолчанию `latest`): имя ветки через дефис или sha коммита — для поэтапной раскатки |
 
 ### WEB-прокси
 
@@ -234,7 +243,7 @@ fake TLS. Добавлять в `.env` вручную — установщик �
 Требования к домену WEB-прокси: собственный FQDN, A-запись на IP ноды
 (`WEB_BIND_IP`, если он задан) и обязательно **DNS only — серое облако**.
 Проксирование через Cloudflare терминирует TLS у себя и полностью ломает
-WEB-каррier; нода отказывается создавать такой прокси.
+WEB-carrier; нода отказывается создавать такой прокси.
 
 Проверить, готова ли нода: `GET /api/capabilities`.
 
@@ -306,9 +315,11 @@ curl -X POST http://NODE_IP:8443/api/proxies \
 - Linux (Ubuntu 20.04+, Debian 11+, CentOS 8+)
 - Docker Engine 20.10+
 - Docker Compose v2
-- Порт 443 свободен (для nginx)
+- Порт 443 свободен (для nginx) — либо `NGINX_PORT` на другом порту и `WEB_BIND_IP` для WEB
 - 512 MB RAM, 1 GB диск
 
 ## Связанный проект
 
-Панель управления: [mtproto-panel](https://github.com/danielVNru/mtproto-panel)
+Панель управления: [urbnywrt/mtproto-panel](https://github.com/urbnywrt/mtproto-panel)
+
+Исходный проект: [danielVNru/mtproto-node](https://github.com/danielVNru/mtproto-node)
