@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { config, FAKE_TLS_DOMAINS } from '../config';
+import { config, FAKE_TLS_DOMAINS, TELEMT_VERSION } from '../config';
 import { ProxyConfig, ProxyCreateRequest, ProxyStats, ProxyType, ProxyUpdateRequest, ConnectedIpInfo, StatsSnapshot, IpHistoryEntry, WebCarrier, WebSecretMode } from '../types';
 import { generateSecret, getRandomElement, getRandomPort, buildFullSecret } from '../utils/crypto';
 import * as store from '../store';
@@ -200,21 +200,23 @@ export async function createProxy(req: ProxyCreateRequest): Promise<ProxyConfig>
   }
 }
 
+/** Refreshes status from Docker and reports which telemt the container really runs. */
+async function applyRuntime(proxy: ProxyConfig): Promise<void> {
+  const { status, telemtVersion } = await dockerService.getContainerRuntime(proxy.containerName);
+  if (status === 'running') proxy.status = 'running';
+  else if (status === 'paused') proxy.status = 'paused';
+  else if (status === 'not_found') proxy.status = 'error';
+  else proxy.status = 'stopped';
+
+  proxy.telemtVersion = telemtVersion;
+  // An existing container with an unknown version is necessarily older than the labels.
+  proxy.telemtOutdated = status !== 'not_found' && telemtVersion !== TELEMT_VERSION;
+}
+
 export async function listProxies(): Promise<ProxyConfig[]> {
   const proxies = store.getAllProxies();
-
-  // Update status from Docker
   for (const proxy of proxies) {
-    const status = await dockerService.getContainerStatus(proxy.containerName);
-    if (status === 'running') {
-      proxy.status = 'running';
-    } else if (status === 'paused') {
-      proxy.status = 'paused';
-    } else if (status === 'not_found') {
-      proxy.status = 'error';
-    } else {
-      proxy.status = 'stopped';
-    }
+    await applyRuntime(proxy);
   }
 
   // Attach nginxPort so clients can display the effective connection port
@@ -223,13 +225,7 @@ export async function listProxies(): Promise<ProxyConfig[]> {
 
 export async function getProxy(id: string): Promise<ProxyConfig | undefined> {
   const proxy = store.getProxyById(id);
-  if (proxy) {
-    const status = await dockerService.getContainerStatus(proxy.containerName);
-    if (status === 'running') proxy.status = 'running';
-    else if (status === 'paused') proxy.status = 'paused';
-    else if (status === 'not_found') proxy.status = 'error';
-    else proxy.status = 'stopped';
-  }
+  if (proxy) await applyRuntime(proxy);
   return proxy;
 }
 

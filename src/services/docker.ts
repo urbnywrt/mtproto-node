@@ -116,7 +116,8 @@ export async function ensureProxyImage(): Promise<void> {
     const stream = Readable.from(tarBuffer);
 
     await new Promise<void>((resolve, reject) => {
-      docker.buildImage(stream, { t: config.proxyImageName, labels: { 'dockerfile.hash': DOCKERFILE_HASH } }, (err, output) => {
+      const labels = { 'dockerfile.hash': DOCKERFILE_HASH, 'telemt.version': TELEMT_VERSION };
+      docker.buildImage(stream, { t: config.proxyImageName, labels }, (err, output) => {
         if (err) return reject(err);
         if (!output) return reject(new Error('No build stream'));
         docker.modem.followProgress(output, (err2: Error | null) => {
@@ -741,6 +742,49 @@ export async function getContainerStats(containerName: string): Promise<{
     networkRxBytes: netRx,
     networkTxBytes: netTx,
   };
+}
+
+export interface ContainerRuntime {
+  status: string;
+  /**
+   * telemt version the container actually runs. It is fixed when the container is
+   * created: rebuilding the image for a new TELEMT_VERSION leaves running containers on
+   * the old one until they are recreated. null when the container is gone or its image
+   * predates version labels and was built from a different Dockerfile.
+   */
+  telemtVersion: string | null;
+}
+
+/** Image IDs are content hashes, so a label read once never changes. */
+const imageVersionCache = new Map<string, string | null>();
+
+async function readImageTelemtVersion(imageId: string): Promise<string | null> {
+  if (imageVersionCache.has(imageId)) return imageVersionCache.get(imageId)!;
+  let version: string | null = null;
+  try {
+    const labels = (await docker.getImage(imageId).inspect()).Config?.Labels || {};
+    if (labels['telemt.version']) {
+      version = labels['telemt.version'];
+    } else if (labels['dockerfile.hash'] === DOCKERFILE_HASH) {
+      // Built by this very Dockerfile before the version label existed.
+      version = TELEMT_VERSION;
+    }
+  } catch {
+    // Image already removed — nothing left to read the version from.
+    return null;
+  }
+  imageVersionCache.set(imageId, version);
+  return version;
+}
+
+export async function getContainerRuntime(containerName: string): Promise<ContainerRuntime> {
+  let info;
+  try {
+    info = await docker.getContainer(containerName).inspect();
+  } catch {
+    return { status: 'not_found', telemtVersion: null };
+  }
+  return { status: info.State.Status, telemtVersion: await readImageTelemtVersion(info.Image) };
 }
 
 export async function getContainerStatus(containerName: string): Promise<string> {

@@ -58,6 +58,10 @@ export interface ProxyConfig extends WebProxyFields, WebRuntimeFields {
   certLastError?: string;
   containerName: string;
   status: 'running' | 'stopped' | 'paused' | 'error';
+  /** telemt version inside the running container. Filled on read, never stored. */
+  telemtVersion?: string | null;
+  /** The container runs a different telemt than the node builds — recreate it to update. */
+  telemtOutdated?: boolean;
   createdAt: string;
   tag?: string;
   trafficUp: number;
