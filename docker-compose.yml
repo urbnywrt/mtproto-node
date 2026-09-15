@@ -5,10 +5,10 @@ services:
     build:
       context: .
       provenance: false
-    # Готовый образ из GHCR. Задайте IMAGE_REPO в .env, чтобы тянуть из своего
-    # форка: IMAGE_REPO=ghcr.io/urbnywrt. IMAGE_TAG можно пинить на конкретный
-    # коммит вместо latest.
-    image: ${IMAGE_REPO:-ghcr.io/danielvnru}/mtproto-node:${IMAGE_TAG:-latest}
+    # Готовый образ из GHCR. IMAGE_REPO в .env переопределяет реестр (например
+    # ghcr.io/danielvnru для образов автора), IMAGE_TAG пинит ветку или коммит
+    # вместо latest.
+    image: ${IMAGE_REPO:-ghcr.io/urbnywrt}/mtproto-node:${IMAGE_TAG:-latest}
     container_name: mtproto-service-node
     restart: unless-stopped
     logging:
