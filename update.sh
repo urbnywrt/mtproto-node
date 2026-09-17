@@ -108,10 +108,12 @@ else
     echo -e "  Запущенных прокси не найдено"
 fi
 
-echo -e "${CYAN}[2/5] Остановка сервис-ноды...${NC}"
-docker compose down
+echo -e "${CYAN}[2/5] Получение обновлений из репозитория...${NC}"
 
-echo -e "${CYAN}[3/5] Получение обновлений из репозитория...${NC}"
+# Код обновляем до остановки ноды. Раньше было наоборот, и конфликт локальных правок с
+# новой версией оставлял маркеры прямо в docker-compose.yml: compose переставал читать
+# файл, а нода к тому моменту была уже остановлена и не поднималась до ручной правки.
+# Пока ничего не остановлено, из конфликта можно просто выйти — прокси и не заметят.
 
 # Сохраняем локальные изменения если есть (data/, .env)
 git stash --include-untracked 2>/dev/null || true
@@ -129,6 +131,28 @@ echo -e "  Ветка: ${YELLOW}${BRANCH}${NC}"
 git fetch origin "$BRANCH"
 git reset --hard "origin/$BRANCH"
 git stash pop 2>/dev/null || true
+
+CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
+if [ -n "$CONFLICTS" ]; then
+    echo ""
+    echo -e "${RED}Локальные правки конфликтуют с новой версией:${NC}"
+    echo "$CONFLICTS" | sed 's/^/  /'
+    echo ""
+    echo -e "${GREEN}Нода не остановлена и работает на прежней версии, прокси не затронуты.${NC}"
+    echo -e "Правки сохранены в заначке — посмотреть: ${YELLOW}git stash show -p 'stash@{0}'${NC}"
+    echo -e "Порты и образ задаются в .env (PORT, NGINX_PORT, IMAGE_REPO, IMAGE_TAG),"
+    echo -e "остальное — в docker-compose.override.yml. Чтобы взять версию из репозитория:"
+    echo ""
+    for f in $CONFLICTS; do
+        echo -e "  ${YELLOW}git checkout origin/${BRANCH} -- ${f}${NC}"
+    done
+    echo -e "  ${YELLOW}git stash drop 'stash@{0}'${NC}   # если правка больше не нужна"
+    echo -e "  ${YELLOW}bash update.sh${NC}"
+    exit 1
+fi
+
+echo -e "${CYAN}[3/5] Остановка сервис-ноды...${NC}"
+docker compose down
 
 echo -e "${CYAN}[4/5] Загрузка и запуск обновлённой сервис-ноды...${NC}"
 export COMPOSE_PROJECT_NAME=mtproto-node
