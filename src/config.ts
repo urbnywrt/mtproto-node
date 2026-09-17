@@ -1,6 +1,6 @@
 import path from 'path';
 
-const DEFAULT_TELEMT_VERSION = '3.5.2';
+const DEFAULT_TELEMT_VERSION = '3.5.7';
 
 /**
  * Pinned explicitly instead of "latest".

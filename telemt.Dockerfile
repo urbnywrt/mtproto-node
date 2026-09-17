@@ -7,7 +7,7 @@ RUN apt-get update && \
 # Standalone build path. The service node does not use this file — it builds from the
 # inline template in src/services/docker.ts. Keep the default in sync with
 # DEFAULT_TELEMT_VERSION in src/config.ts; override with --build-arg TELEMT_VERSION=X.Y.Z.
-ARG TELEMT_VERSION=3.5.2
+ARG TELEMT_VERSION=3.5.7
 
 RUN wget -qO- "https://github.com/telemt/telemt/releases/download/${TELEMT_VERSION}/telemt-x86_64-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/telemt
